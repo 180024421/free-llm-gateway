@@ -1,0 +1,93 @@
+{
+  "name": "dashuai-gateway",
+  "displayName": "大帅网关",
+  "description": "把 Cursor / VS Code 请求转发到本机大帅网关（OpenAI 兼容）",
+  "version": "0.3.0",
+  "publisher": "dashuai",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "AI",
+    "Chat",
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "dashuai.openChat",
+        "title": "大帅网关: 打开智能问答"
+      },
+      {
+        "command": "dashuai.openDashboard",
+        "title": "大帅网关: 打开控制台"
+      },
+      {
+        "command": "dashuai.copyBaseUrl",
+        "title": "大帅网关: 复制 API Base URL"
+      },
+      {
+        "command": "dashuai.applyCursorHint",
+        "title": "大帅网关: 显示 Cursor / Continue 接入说明"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "dashuai",
+          "title": "大帅网关",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "dashuai": [
+        {
+          "type": "webview",
+          "id": "dashuai.chatView",
+          "name": "智能问答"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "大帅网关",
+      "properties": {
+        "dashuai.baseUrl": {
+          "type": "string",
+          "default": "http://127.0.0.1:8010/v1",
+          "description": "大帅网关 OpenAI Base URL"
+        },
+        "dashuai.apiKey": {
+          "type": "string",
+          "default": "sk-local-change-me",
+          "description": "本地网关 API Key（与 data/config.json 一致）"
+        },
+        "dashuai.model": {
+          "type": "string",
+          "default": "daily",
+          "description": "默认路由模型名（daily / fast / 256k / 1m）"
+        },
+        "dashuai.dashboardUrl": {
+          "type": "string",
+          "default": "http://127.0.0.1:8010/ui/",
+          "description": "控制台地址"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p .",
+    "watch": "tsc -watch -p .",
+    "package": "npm run compile && npx --yes @vscode/vsce package --no-dependencies"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "^3.2.0",
+    "typescript": "^5.3.3"
+  }
+}

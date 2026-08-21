@@ -1,0 +1,8 @@
+{
+  "host": "127.0.0.1",
+  "port": 8010,
+  "local_api_key": "sk-local-change-me",
+  "request_timeout_sec": 120,
+  "max_retries_per_request": 4,
+  "health_probe_interval_sec": 60
+}

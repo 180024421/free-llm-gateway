@@ -1,0 +1,25 @@
+---
+description: dashuai-gateway Agent 入口契约（仅在本仓库相关任务时加载）
+globs: **/*
+alwaysApply: false
+---
+
+# AGENTS.md — 大帅网关
+
+品牌：**大帅网关 / Dashuai Gateway**。无 license / 无过期。
+
+## 结构
+
+- `gateway/` — FastAPI 服务
+- `web/` — 控制台
+- `packaging/` — Windows EXE / Inno 安装包
+- `clients/vscode/` — VS Code + Cursor 扩展
+- `clients/idea/` — IntelliJ 插件
+- `clients/android/` — 智能问答 APK
+- `data/*.example.json` — 配置模板
+
+## 约定
+
+- 默认 `127.0.0.1:8010`
+- 打包 EXE 时可用环境变量 `DASHUAI_DATA_DIR`
+- 勿提交真实 API Key
