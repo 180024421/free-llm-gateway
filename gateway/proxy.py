@@ -2,14 +2,12 @@ from __future__ import annotations
 
 import json
 import time
-from pathlib import Path
 from typing import Any, AsyncIterator
 
 import httpx
 
 from .config import DATA_DIR
 from .state import STATE
-
 
 USAGE_PATH = DATA_DIR / "usage.jsonl"
 
@@ -24,13 +22,58 @@ def _normalize_base(url: str) -> str:
     u = (url or "").rstrip("/")
     if u.endswith("/chat/completions"):
         u = u[: -len("/chat/completions")]
+    if u.endswith("/v1"):
+        return u
+    # allow bare host roots that already include /v1
     return u
+
+
+def rewrite_model_field(obj: Any, client_model: str) -> Any:
+    """Keep client-facing model id stable (route name), hide upstream id."""
+    if isinstance(obj, dict):
+        if "model" in obj and obj["model"] is not None:
+            obj = dict(obj)
+            obj["model"] = client_model
+        return obj
+    return obj
+
+
+def _rewrite_sse_bytes(chunk: bytes, client_model: str) -> bytes:
+    try:
+        text = chunk.decode("utf-8")
+    except UnicodeDecodeError:
+        return chunk
+    out_lines: list[str] = []
+    changed = False
+    for line in text.splitlines(keepends=True):
+        raw = line
+        ends = ""
+        if raw.endswith("\r\n"):
+            body, ends = raw[:-2], "\r\n"
+        elif raw.endswith("\n"):
+            body, ends = raw[:-1], "\n"
+        else:
+            body, ends = raw, ""
+        if body.startswith("data: ") and body[6:].strip() not in ("", "[DONE]"):
+            payload = body[6:]
+            try:
+                data = json.loads(payload)
+                data = rewrite_model_field(data, client_model)
+                body = "data: " + json.dumps(data, ensure_ascii=False)
+                changed = True
+            except Exception:
+                pass
+        out_lines.append(body + ends)
+    if not changed:
+        return chunk
+    return "".join(out_lines).encode("utf-8")
 
 
 async def forward_chat(
     *,
     provider: dict[str, Any],
     upstream_model: str,
+    client_model: str,
     body: dict[str, Any],
     timeout_sec: float,
     stream: bool,
@@ -50,10 +93,11 @@ async def forward_chat(
     meta: dict[str, Any] = {
         "provider": name,
         "upstream_model": upstream_model,
+        "client_model": client_model,
         "url": url,
     }
 
-    client = httpx.AsyncClient(timeout=timeout_sec)
+    client = httpx.AsyncClient(timeout=timeout_sec, follow_redirects=True)
     try:
         if stream:
             req = client.build_request("POST", url, headers=headers, json=payload)
@@ -76,7 +120,7 @@ async def forward_chat(
             async def gen() -> AsyncIterator[bytes]:
                 try:
                     async for chunk in resp.aiter_bytes():
-                        yield chunk
+                        yield _rewrite_sse_bytes(chunk, client_model)
                 finally:
                     await resp.aclose()
                     await client.aclose()
@@ -85,6 +129,7 @@ async def forward_chat(
                             "ts": time.time(),
                             "provider": name,
                             "model": upstream_model,
+                            "client_model": client_model,
                             "stream": True,
                             "latency_ms": meta.get("latency_ms"),
                             "ok": True,
@@ -109,6 +154,7 @@ async def forward_chat(
         usage = {}
         try:
             data = resp.json()
+            data = rewrite_model_field(data, client_model)
             usage = data.get("usage") or {}
         except Exception:
             data = None
@@ -117,18 +163,21 @@ async def forward_chat(
                 "ts": time.time(),
                 "provider": name,
                 "model": upstream_model,
+                "client_model": client_model,
                 "stream": False,
                 "latency_ms": meta.get("latency_ms"),
                 "ok": True,
                 "usage": usage,
             }
         )
-        # keep response open until caller reads; close client after
         meta["_client"] = client
         meta["_raw"] = data if data is not None else resp.text
         return resp, None, meta
     except Exception as e:
-        await client.aclose()
+        try:
+            await client.aclose()
+        except Exception:
+            pass
         STATE.get(name, upstream_model).mark_fail(str(e))
         meta["error"] = str(e)
         return None, None, meta

@@ -2,11 +2,16 @@ from __future__ import annotations
 
 import json
 import shutil
+import threading
+import time
 from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = ROOT / "data"
+
+_lock = threading.RLock()
+_cache: dict[str, tuple[float, Any]] = {}
 
 
 def _ensure_from_example(name: str) -> Path:
@@ -32,39 +37,122 @@ def save_json(path: Path, data: Any) -> None:
         json.dump(data, f, ensure_ascii=False, indent=2)
         f.write("\n")
     tmp.replace(path)
+    with _lock:
+        _cache.pop(path.name, None)
+
+
+def _cached_load(name: str, default: Any) -> Any:
+    path = _ensure_from_example(name)
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        return default
+    with _lock:
+        hit = _cache.get(name)
+        if hit and hit[0] == mtime:
+            return hit[1]
+    data = load_json(path, default)
+    with _lock:
+        _cache[name] = (mtime, data)
+    return data
 
 
 def load_config() -> dict[str, Any]:
-    path = _ensure_from_example("config.json")
-    cfg = load_json(
-        path,
-        {
-            "host": "127.0.0.1",
-            "port": 8010,
-            "local_api_key": "sk-local-change-me",
-            "request_timeout_sec": 120,
-            "max_retries_per_request": 4,
-            "health_probe_interval_sec": 60,
-        },
+    return dict(
+        _cached_load(
+            "config.json",
+            {
+                "host": "127.0.0.1",
+                "port": 8010,
+                "local_api_key": "sk-local-change-me",
+                "request_timeout_sec": 120,
+                "max_retries_per_request": 4,
+                "health_probe_interval_sec": 60,
+            },
+        )
     )
-    return cfg
 
 
 def load_providers() -> list[dict[str, Any]]:
-    path = _ensure_from_example("providers.json")
-    raw = load_json(path, [])
-    if not isinstance(raw, list):
-        return []
-    return raw
+    raw = _cached_load("providers.json", [])
+    return list(raw) if isinstance(raw, list) else []
 
 
 def load_routers() -> dict[str, Any]:
-    path = _ensure_from_example("routers.json")
-    raw = load_json(path, {})
-    if not isinstance(raw, dict):
-        return {}
-    return raw
+    raw = _cached_load("routers.json", {})
+    return dict(raw) if isinstance(raw, dict) else {}
+
+
+def save_config(cfg: dict[str, Any]) -> None:
+    save_json(DATA_DIR / "config.json", cfg)
+
+
+def save_providers(providers: list[dict[str, Any]]) -> None:
+    save_json(DATA_DIR / "providers.json", providers)
+
+
+def save_routers(routers: dict[str, Any]) -> None:
+    save_json(DATA_DIR / "routers.json", routers)
 
 
 def reload_all() -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, Any]]:
     return load_config(), load_providers(), load_routers()
+
+
+def mask_secret(value: str | None) -> str:
+    s = (value or "").strip()
+    if not s:
+        return ""
+    if s.startswith("REPLACE_"):
+        return s
+    if len(s) <= 8:
+        return "*" * len(s)
+    return f"{s[:4]}…{s[-4:]}"
+
+
+def provider_is_ready(p: dict[str, Any]) -> bool:
+    if not p.get("enabled", True):
+        return False
+    key = (p.get("api_key") or "").strip()
+    if not key or key.startswith("REPLACE_"):
+        return False
+    return bool(p.get("models"))
+
+
+def overview_payload(base_url: str) -> dict[str, Any]:
+    cfg, providers, routers = reload_all()
+    ready = [p for p in providers if provider_is_ready(p)]
+    return {
+        "ok": True,
+        "ts": time.time(),
+        "base_url": base_url.rstrip("/"),
+        "openai_base": f"{base_url.rstrip('/')}/v1",
+        "config": {
+            "host": cfg.get("host"),
+            "port": cfg.get("port"),
+            "local_api_key_masked": mask_secret(cfg.get("local_api_key")),
+            "local_api_key_set": bool((cfg.get("local_api_key") or "").strip()),
+            "request_timeout_sec": cfg.get("request_timeout_sec"),
+            "max_retries_per_request": cfg.get("max_retries_per_request"),
+        },
+        "providers": [
+            {
+                "name": p.get("name"),
+                "base_url": p.get("base_url"),
+                "api_key_masked": mask_secret(p.get("api_key")),
+                "api_key_ready": provider_is_ready(p),
+                "models": p.get("models") or [],
+                "weight": p.get("weight", 1),
+                "enabled": p.get("enabled", True),
+                "free_only": p.get("free_only", False),
+            }
+            for p in providers
+        ],
+        "providers_ready": [p.get("name") for p in ready],
+        "routes": routers,
+        "checklist": {
+            "has_ready_provider": len(ready) > 0,
+            "has_routes": len(routers) > 0,
+            "bind_localhost": (cfg.get("host") or "") in ("127.0.0.1", "localhost"),
+        },
+    }

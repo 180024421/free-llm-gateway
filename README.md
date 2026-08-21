@@ -12,7 +12,13 @@
 - 按健康分与权重选路，429/5xx/网络错误自动试下一个
 - 简易熔断，避免死磕坏渠道
 - 用量追加写入 `data/usage.jsonl`
-- 本地面板：`http://127.0.0.1:8010/ui/`
+## 面板
+
+启动后打开：`http://127.0.0.1:8010/ui/`
+
+- 一键复制 Base URL / WorkBuddy 配置
+- 可视化就绪清单、渠道健康
+- 在网页里改上游 Key 并保存（需本地 API Key 鉴权）
 - **无 license / 无试用倒计时 / 无联网激活**
 
 ## 快速开始（Windows）
@@ -81,6 +87,13 @@ curl 冒烟：
 ```powershell
 curl http://127.0.0.1:8010/health
 curl http://127.0.0.1:8010/v1/models -H "Authorization: Bearer sk-local-change-me"
+```
+
+## 开发自检
+
+```powershell
+.\.venv\Scripts\pip install -r requirements-dev.txt
+.\.venv\Scripts\pytest -q
 ```
 
 ## 安全说明

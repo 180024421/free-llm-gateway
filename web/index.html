@@ -4,124 +4,668 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Free LLM Gateway</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,700&family=Sora:wght@400;500;600;700&display=swap" rel="stylesheet" />
   <style>
     :root {
-      --bg: #0f1419;
-      --panel: #1a2332;
-      --text: #e7ecf3;
-      --muted: #8b9bb4;
-      --ok: #3dd68c;
-      --bad: #ff6b6b;
-      --accent: #5b9fff;
+      --ink: #07110f;
+      --ink-2: #0d1a17;
+      --panel: rgba(14, 28, 24, 0.72);
+      --line: rgba(196, 214, 198, 0.14);
+      --text: #edf3ef;
+      --muted: #9bb0a6;
+      --jade: #6fbf9a;
+      --jade-deep: #3d8f6e;
+      --sand: #e4c48a;
+      --danger: #ff7b72;
+      --ok: #7dffb3;
+      --shadow: 0 30px 80px rgba(0, 0, 0, 0.45);
+      --radius: 22px;
     }
     * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
     body {
       margin: 0;
-      font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
-      background: radial-gradient(1200px 600px at 10% -10%, #1c2b44, var(--bg));
-      color: var(--text);
       min-height: 100vh;
-      padding: 32px 20px 48px;
+      color: var(--text);
+      font-family: "Sora", "PingFang SC", "Microsoft YaHei", sans-serif;
+      background:
+        radial-gradient(1200px 700px at 12% -10%, rgba(111, 191, 154, 0.18), transparent 55%),
+        radial-gradient(900px 600px at 90% 10%, rgba(228, 196, 138, 0.12), transparent 50%),
+        linear-gradient(165deg, #050a09 0%, var(--ink) 40%, #0a1512 100%);
+      overflow-x: hidden;
     }
-    main { max-width: 920px; margin: 0 auto; }
-    h1 { font-size: 1.6rem; margin: 0 0 8px; }
-    p { color: var(--muted); line-height: 1.6; }
-    .grid { display: grid; gap: 16px; margin-top: 24px; }
-    .card {
-      background: color-mix(in srgb, var(--panel) 92%, white 8%);
-      border: 1px solid #2a3a52;
+    body::before {
+      content: "";
+      position: fixed;
+      inset: 0;
+      background-image:
+        linear-gradient(rgba(237, 243, 239, 0.03) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(237, 243, 239, 0.03) 1px, transparent 1px);
+      background-size: 48px 48px;
+      mask-image: radial-gradient(circle at 50% 20%, black, transparent 75%);
+      pointer-events: none;
+      z-index: 0;
+    }
+    .wrap {
+      position: relative;
+      z-index: 1;
+      max-width: 1120px;
+      margin: 0 auto;
+      padding: 28px 20px 64px;
+    }
+    .topbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      margin-bottom: 28px;
+      animation: rise 0.7s ease both;
+    }
+    .brand-mark {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .logo {
+      width: 42px;
+      height: 42px;
       border-radius: 14px;
-      padding: 16px 18px;
+      background:
+        linear-gradient(145deg, rgba(111,191,154,.95), rgba(61,143,110,.85)),
+        var(--ink-2);
+      box-shadow: 0 10px 30px rgba(111, 191, 154, 0.25);
+      display: grid;
+      place-items: center;
+      font-family: "Fraunces", serif;
+      font-weight: 700;
+      color: #04110c;
     }
-    code, pre {
-      font-family: ui-monospace, Consolas, monospace;
-      background: #0c1118;
-      border-radius: 8px;
+    .brand-name {
+      font-family: "Fraunces", Georgia, serif;
+      font-size: 1.15rem;
+      letter-spacing: 0.02em;
     }
-    code { padding: 2px 6px; }
-    pre { padding: 12px; overflow: auto; font-size: 0.85rem; }
-    .ok { color: var(--ok); }
-    .bad { color: var(--bad); }
-    button {
-      background: var(--accent);
-      color: #071018;
-      border: 0;
-      border-radius: 10px;
+    .brand-sub { color: var(--muted); font-size: 0.78rem; margin-top: 2px; }
+    .live {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
       padding: 8px 14px;
-      font-weight: 600;
-      cursor: pointer;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: rgba(7, 17, 15, 0.55);
+      backdrop-filter: blur(10px);
+      font-size: 0.82rem;
+      color: var(--muted);
     }
-    table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
-    th, td { text-align: left; padding: 8px 6px; border-bottom: 1px solid #2a3a52; }
-    th { color: var(--muted); font-weight: 600; }
+    .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--danger);
+      box-shadow: 0 0 0 0 rgba(255, 123, 114, 0.5);
+    }
+    .dot.on {
+      background: var(--ok);
+      animation: pulse 1.8s ease infinite;
+    }
+    @keyframes pulse {
+      0% { box-shadow: 0 0 0 0 rgba(125, 255, 179, 0.55); }
+      70% { box-shadow: 0 0 0 10px rgba(125, 255, 179, 0); }
+      100% { box-shadow: 0 0 0 0 rgba(125, 255, 179, 0); }
+    }
+    @keyframes rise {
+      from { opacity: 0; transform: translateY(14px); }
+      to { opacity: 1; transform: none; }
+    }
+    .hero {
+      padding: 8px 0 8px;
+      animation: rise 0.8s ease 0.05s both;
+    }
+    .hero h1 {
+      margin: 0;
+      font-family: "Fraunces", Georgia, serif;
+      font-weight: 700;
+      font-size: clamp(2.4rem, 6vw, 4.2rem);
+      line-height: 1.05;
+      letter-spacing: -0.02em;
+      max-width: 14ch;
+    }
+    .hero h1 span {
+      background: linear-gradient(120deg, var(--jade), var(--sand));
+      -webkit-background-clip: text;
+      background-clip: text;
+      color: transparent;
+    }
+    .hero-lead {
+      margin: 18px 0 0;
+      max-width: 46ch;
+      color: var(--muted);
+      font-size: 1.05rem;
+      line-height: 1.7;
+    }
+    .cta-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin-top: 28px;
+    }
+    .btn {
+      appearance: none;
+      border: 0;
+      cursor: pointer;
+      font-family: inherit;
+      font-weight: 600;
+      font-size: 0.92rem;
+      border-radius: 14px;
+      padding: 12px 18px;
+      transition: transform 0.15s ease, box-shadow 0.15s ease, background 0.15s ease;
+    }
+    .btn:active { transform: translateY(1px); }
+    .btn-primary {
+      color: #04110c;
+      background: linear-gradient(135deg, var(--jade), #9fd9b8);
+      box-shadow: 0 12px 30px rgba(111, 191, 154, 0.28);
+    }
+    .btn-primary:hover { box-shadow: 0 16px 36px rgba(111, 191, 154, 0.38); }
+    .btn-ghost {
+      color: var(--text);
+      background: transparent;
+      border: 1px solid var(--line);
+    }
+    .btn-ghost:hover { border-color: rgba(111, 191, 154, 0.45); }
+    .btn-sand {
+      color: #1a1408;
+      background: linear-gradient(135deg, var(--sand), #f0d7a8);
+    }
+    .stats {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 14px;
+      margin: 36px 0 8px;
+      animation: rise 0.85s ease 0.1s both;
+    }
+    .stat {
+      padding: 18px 16px;
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      background: linear-gradient(180deg, rgba(255,255,255,0.03), transparent), var(--panel);
+      backdrop-filter: blur(14px);
+    }
+    .stat .k { color: var(--muted); font-size: 0.75rem; letter-spacing: 0.06em; text-transform: uppercase; }
+    .stat .v {
+      margin-top: 10px;
+      font-family: "Fraunces", serif;
+      font-size: 1.7rem;
+      line-height: 1;
+    }
+    .stat .hint { margin-top: 8px; color: var(--muted); font-size: 0.8rem; }
+    .grid {
+      display: grid;
+      grid-template-columns: 1.2fr 0.8fr;
+      gap: 18px;
+      margin-top: 22px;
+    }
+    .panel {
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: linear-gradient(180deg, rgba(255,255,255,0.03), transparent 40%), var(--panel);
+      backdrop-filter: blur(16px);
+      box-shadow: var(--shadow);
+      padding: 22px;
+      animation: rise 0.9s ease both;
+    }
+    .panel h2 {
+      margin: 0 0 6px;
+      font-family: "Fraunces", serif;
+      font-size: 1.35rem;
+      font-weight: 600;
+    }
+    .panel .desc { margin: 0 0 18px; color: var(--muted); font-size: 0.9rem; line-height: 1.6; }
+    .field { margin-bottom: 14px; }
+    label {
+      display: block;
+      margin-bottom: 8px;
+      color: var(--muted);
+      font-size: 0.8rem;
+    }
+    input, textarea, select {
+      width: 100%;
+      border: 1px solid var(--line);
+      background: rgba(5, 12, 10, 0.65);
+      color: var(--text);
+      border-radius: 12px;
+      padding: 12px 14px;
+      font: inherit;
+      outline: none;
+    }
+    input:focus, textarea:focus, select:focus {
+      border-color: rgba(111, 191, 154, 0.55);
+      box-shadow: 0 0 0 3px rgba(111, 191, 154, 0.12);
+    }
+    textarea { min-height: 120px; resize: vertical; font-family: ui-monospace, Consolas, monospace; font-size: 0.82rem; }
+    .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+    .chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 10px;
+      border-radius: 999px;
+      border: 1px solid var(--line);
+      font-size: 0.78rem;
+      color: var(--muted);
+      background: rgba(0,0,0,0.2);
+    }
+    .chip.ok { color: var(--ok); border-color: rgba(125,255,179,0.25); }
+    .chip.bad { color: var(--danger); border-color: rgba(255,123,114,0.25); }
+    .copybox {
+      display: flex;
+      gap: 8px;
+      align-items: stretch;
+    }
+    .copybox code {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      padding: 12px 14px;
+      border-radius: 12px;
+      border: 1px solid var(--line);
+      background: rgba(5, 12, 10, 0.65);
+      font-family: ui-monospace, Consolas, monospace;
+      font-size: 0.85rem;
+      overflow: auto;
+      white-space: nowrap;
+    }
+    .provider {
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      padding: 14px;
+      margin-bottom: 12px;
+      background: rgba(0,0,0,0.18);
+    }
+    .provider header {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      align-items: center;
+      margin-bottom: 10px;
+    }
+    .provider h3 { margin: 0; font-size: 1rem; }
+    .muted { color: var(--muted); }
+    .tiny { font-size: 0.78rem; }
+    table { width: 100%; border-collapse: collapse; font-size: 0.86rem; }
+    th, td { text-align: left; padding: 10px 6px; border-bottom: 1px solid var(--line); vertical-align: top; }
+    th { color: var(--muted); font-weight: 500; font-size: 0.75rem; letter-spacing: 0.04em; text-transform: uppercase; }
+    .toast {
+      position: fixed;
+      right: 20px;
+      bottom: 20px;
+      padding: 12px 16px;
+      border-radius: 12px;
+      background: #12352a;
+      border: 1px solid rgba(111,191,154,0.35);
+      color: var(--text);
+      box-shadow: var(--shadow);
+      opacity: 0;
+      transform: translateY(8px);
+      pointer-events: none;
+      transition: 0.25s ease;
+      z-index: 20;
+    }
+    .toast.show { opacity: 1; transform: none; }
+    .checklist { display: grid; gap: 10px; }
+    .check-item {
+      display: flex;
+      gap: 10px;
+      align-items: flex-start;
+      padding: 12px 12px;
+      border-radius: 14px;
+      border: 1px solid var(--line);
+      background: rgba(0,0,0,0.16);
+    }
+    .check-item .mark {
+      width: 22px; height: 22px; border-radius: 50%;
+      display: grid; place-items: center; flex: 0 0 auto;
+      font-size: 0.75rem; font-weight: 700;
+    }
+    .check-item.pass .mark { background: rgba(125,255,179,0.15); color: var(--ok); }
+    .check-item.fail .mark { background: rgba(255,123,114,0.12); color: var(--danger); }
+    .full { grid-column: 1 / -1; }
+    @media (max-width: 900px) {
+      .stats { grid-template-columns: repeat(2, 1fr); }
+      .grid { grid-template-columns: 1fr; }
+      .hero h1 { max-width: none; }
+    }
   </style>
 </head>
 <body>
-  <main>
-    <h1>Free LLM Gateway</h1>
-    <p>无授权、无过期。把 WorkBuddy / 其它 OpenAI 兼容客户端指到 <code>http://127.0.0.1:8010/v1</code>。</p>
-    <div class="grid">
-      <section class="card">
-        <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;">
-          <strong>运行状态</strong>
-          <button type="button" onclick="refresh()">刷新</button>
+  <div class="wrap">
+    <header class="topbar">
+      <div class="brand-mark">
+        <div class="logo">F</div>
+        <div>
+          <div class="brand-name">Free LLM Gateway</div>
+          <div class="brand-sub">无授权 · 无过期 · OpenAI 兼容</div>
         </div>
-        <p id="status">加载中…</p>
-        <pre id="health">{}</pre>
-      </section>
-      <section class="card">
-        <strong>WorkBuddy 对接示例</strong>
-        <pre>{
-  "id": "daily",
-  "name": "日常",
-  "vendor": "Custom",
-  "url": "http://127.0.0.1:8010/v1",
-  "apiKey": "（填 data/config.json 的 local_api_key）",
-  "supportsToolCall": true,
-  "maxInputTokens": 1048576,
-  "maxOutputTokens": 32768
-}</pre>
-      </section>
-      <section class="card">
-        <strong>渠道健康</strong>
-        <div style="overflow:auto;margin-top:8px;">
+      </div>
+      <div class="live"><span id="liveDot" class="dot"></span><span id="liveText">检测中</span></div>
+    </header>
+
+    <section class="hero">
+      <h1>一家网关<br /><span>接通所有模型</span></h1>
+      <p class="hero-lead">把 WorkBuddy、ChatBox、Cursor 自定义模型指到本地接口。多家免费额度自动择优与故障切换，用起来像无限量。</p>
+      <div class="cta-row">
+        <button class="btn btn-primary" type="button" id="btnCopyBase">复制 OpenAI Base URL</button>
+        <button class="btn btn-sand" type="button" id="btnCopyWb">复制 WorkBuddy 配置</button>
+        <button class="btn btn-ghost" type="button" id="btnRefresh">刷新状态</button>
+      </div>
+    </section>
+
+    <section class="stats">
+      <div class="stat"><div class="k">就绪渠道</div><div class="v" id="statReady">—</div><div class="hint" id="statReadyHint">填 Key 后生效</div></div>
+      <div class="stat"><div class="k">路由组</div><div class="v" id="statRoutes">—</div><div class="hint">daily / fast / 256k…</div></div>
+      <div class="stat"><div class="k">监听端口</div><div class="v" id="statPort">—</div><div class="hint" id="statHost">127.0.0.1</div></div>
+      <div class="stat"><div class="k">版本</div><div class="v" id="statVer" style="font-size:1.35rem">—</div><div class="hint">MIT · 无激活</div></div>
+    </section>
+
+    <section class="grid">
+      <div class="panel">
+        <h2>一键接入</h2>
+        <p class="desc">客户端只需填本地地址与网关 Key。模型名填路由组（如 daily），网关会自动挑上游。</p>
+        <div class="field">
+          <label>OpenAI Base URL</label>
+          <div class="copybox"><code id="baseUrl">http://127.0.0.1:8010/v1</code><button class="btn btn-ghost" type="button" data-copy="#baseUrl">复制</button></div>
+        </div>
+        <div class="field">
+          <label>本地 API Key（与 data/config.json 一致）</label>
+          <div class="row">
+            <input id="localKey" type="password" placeholder="sk-local-change-me" autocomplete="off" />
+            <button class="btn btn-ghost" type="button" id="btnSaveKey">保存 Key</button>
+            <button class="btn btn-ghost" type="button" id="btnToggleKey">显示</button>
+          </div>
+          <div class="tiny muted" style="margin-top:8px">当前掩码：<span id="keyMasked">—</span></div>
+        </div>
+        <div class="field">
+          <label>推荐模型（路由组）</label>
+          <div class="row" id="routeChips"></div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <h2>就绪清单</h2>
+        <p class="desc">按顺序完成，客户端就能连上。</p>
+        <div class="checklist" id="checklist"></div>
+      </div>
+
+      <div class="panel full">
+        <div class="row" style="justify-content:space-between;margin-bottom:8px">
+          <div>
+            <h2>上游渠道</h2>
+            <p class="desc" style="margin-bottom:0">在面板里改 Key / 开关，立即写入本机 providers.json。</p>
+          </div>
+          <button class="btn btn-primary" type="button" id="btnSaveProviders">保存渠道</button>
+        </div>
+        <div id="providers"></div>
+      </div>
+
+      <div class="panel">
+        <h2>渠道健康</h2>
+        <p class="desc">实时成功率、延迟与熔断状态。</p>
+        <div style="overflow:auto">
           <table>
             <thead>
-              <tr>
-                <th>Provider</th><th>Model</th><th>Score</th><th>Latency</th><th>状态</th>
-              </tr>
+              <tr><th>Provider</th><th>Model</th><th>Score</th><th>Latency</th><th>状态</th></tr>
             </thead>
-            <tbody id="channels"></tbody>
+            <tbody id="channels"><tr><td colspan="5" class="muted">尚无调用记录</td></tr></tbody>
           </table>
         </div>
-      </section>
-    </div>
-  </main>
+      </div>
+
+      <div class="panel">
+        <h2>WorkBuddy 片段</h2>
+        <p class="desc">粘贴进自定义模型或 models.json。</p>
+        <textarea id="wbSnippet" readonly></textarea>
+        <div class="cta-row">
+          <button class="btn btn-sand" type="button" id="btnCopySnippet">复制片段</button>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <div class="toast" id="toast">已复制</div>
+
   <script>
-    async function refresh() {
-      const el = document.getElementById("status");
-      const pre = document.getElementById("health");
-      const tbody = document.getElementById("channels");
-      try {
-        const r = await fetch("/health");
-        const j = await r.json();
-        el.innerHTML = j.ok
-          ? `<span class="ok">正常</span> · 就绪渠道：${(j.providers_ready || []).join(", ") || "无"}`
-          : `<span class="bad">异常</span>`;
-        pre.textContent = JSON.stringify(j, null, 2);
-        tbody.innerHTML = "";
-        for (const c of (j.channels || [])) {
-          const tr = document.createElement("tr");
-          tr.innerHTML = `<td>${c.provider}</td><td>${c.model}</td><td>${c.score}</td><td>${c.last_latency_ms ?? "-"}</td><td>${c.circuit_open ? '<span class="bad">熔断</span>' : '<span class="ok">可用</span>'}</td>`;
-          tbody.appendChild(tr);
-        }
-      } catch (e) {
-        el.innerHTML = `<span class="bad">无法连接网关</span>`;
-        pre.textContent = String(e);
+    const state = {
+      overview: null,
+      providersFull: null,
+      localKey: localStorage.getItem("flg_local_key") || "sk-local-change-me",
+    };
+
+    const $ = (s) => document.querySelector(s);
+    const toast = (msg) => {
+      const el = $("#toast");
+      el.textContent = msg;
+      el.classList.add("show");
+      clearTimeout(toast._t);
+      toast._t = setTimeout(() => el.classList.remove("show"), 1800);
+    };
+
+    async function copyText(text) {
+      await navigator.clipboard.writeText(text);
+      toast("已复制到剪贴板");
+    }
+
+    function authHeaders() {
+      return {
+        "Authorization": `Bearer ${state.localKey}`,
+        "Content-Type": "application/json",
+      };
+    }
+
+    function wbSnippet(base, key) {
+      return JSON.stringify({
+        id: "daily",
+        name: "日常",
+        vendor: "Custom",
+        url: base,
+        apiKey: key,
+        supportsToolCall: true,
+        supportsImages: true,
+        supportsReasoning: true,
+        maxInputTokens: 1048576,
+        maxOutputTokens: 32768
+      }, null, 2);
+    }
+
+    function renderOverview(j) {
+      state.overview = j;
+      const ready = j.providers_ready || [];
+      const routes = Object.keys(j.routes || {});
+      $("#liveDot").classList.toggle("on", !!j.ok);
+      $("#liveText").textContent = j.ok ? `在线 · ${ready.length} 渠道路由` : "离线";
+      $("#statReady").textContent = String(ready.length);
+      $("#statReadyHint").textContent = ready.length ? ready.join(" / ") : "还没有可用 Key";
+      $("#statRoutes").textContent = String(routes.length);
+      $("#statPort").textContent = String(j.config?.port ?? "—");
+      $("#statHost").textContent = j.config?.host || "127.0.0.1";
+      $("#statVer").textContent = j.version || "0.1.0";
+      $("#baseUrl").textContent = j.openai_base || "http://127.0.0.1:8010/v1";
+      $("#keyMasked").textContent = j.config?.local_api_key_masked || "—";
+
+      const chips = $("#routeChips");
+      chips.innerHTML = "";
+      (routes.length ? routes : ["daily", "fast"]).forEach((r) => {
+        const b = document.createElement("button");
+        b.type = "button";
+        b.className = "chip";
+        b.textContent = r;
+        b.onclick = () => copyText(r);
+        chips.appendChild(b);
+      });
+
+      const checks = [
+        { pass: j.checklist?.has_ready_provider, title: "至少配置一个可用上游 Key", tip: "在下方渠道里粘贴 API Key 后保存" },
+        { pass: j.checklist?.has_routes, title: "路由组已就绪", tip: "默认含 daily / fast / 256k / 1m" },
+        { pass: j.config?.local_api_key_set, title: "本地网关 Key 已设置", tip: "客户端 API Key 必须与此一致" },
+        { pass: j.checklist?.bind_localhost, title: "默认仅本机访问", tip: "更安全；若改 0.0.0.0 请换强 Key" },
+      ];
+      $("#checklist").innerHTML = checks.map((c) => `
+        <div class="check-item ${c.pass ? "pass" : "fail"}">
+          <div class="mark">${c.pass ? "✓" : "!"}</div>
+          <div><strong>${c.title}</strong><div class="tiny muted">${c.tip}</div></div>
+        </div>`).join("");
+
+      $("#wbSnippet").value = wbSnippet(j.openai_base, state.localKey);
+
+      const tbody = $("#channels");
+      const channels = j.channels || [];
+      if (!channels.length) {
+        tbody.innerHTML = `<tr><td colspan="5" class="muted">尚无调用记录</td></tr>`;
+      } else {
+        tbody.innerHTML = channels.map((c) => `
+          <tr>
+            <td>${c.provider}</td>
+            <td>${c.model}</td>
+            <td>${c.score}</td>
+            <td>${c.last_latency_ms ?? "—"} ms</td>
+            <td>${c.circuit_open ? '<span class="chip bad">熔断</span>' : '<span class="chip ok">可用</span>'}</td>
+          </tr>`).join("");
       }
     }
+
+    function renderProvidersEditor(list) {
+      const box = $("#providers");
+      if (!list?.length) {
+        box.innerHTML = `<p class="muted">没有渠道。请检查 data/providers.json。</p>`;
+        return;
+      }
+      box.innerHTML = list.map((p, i) => `
+        <div class="provider" data-idx="${i}">
+          <header>
+            <h3>${p.name || "unnamed"}</h3>
+            <label class="tiny muted" style="display:flex;gap:8px;align-items:center;margin:0">
+              <input type="checkbox" data-f="enabled" ${p.enabled !== false ? "checked" : ""} /> 启用
+            </label>
+          </header>
+          <div class="field">
+            <label>Base URL</label>
+            <input data-f="base_url" value="${(p.base_url || "").replaceAll('"','&quot;')}" />
+          </div>
+          <div class="field">
+            <label>API Key</label>
+            <input data-f="api_key" type="password" value="${(p.api_key || "").replaceAll('"','&quot;')}" placeholder="粘贴 Key" />
+          </div>
+          <div class="field">
+            <label>模型列表（逗号分隔）</label>
+            <input data-f="models" value="${(p.models || []).join(", ").replaceAll('"','&quot;')}" />
+          </div>
+          <div class="row">
+            <span class="chip">weight <input data-f="weight" type="number" value="${p.weight ?? 1}" style="width:64px;padding:4px 8px;margin-left:6px" /></span>
+            <span class="chip">${p.free_only ? "free_only" : "mixed"}</span>
+          </div>
+        </div>`).join("");
+    }
+
+    function collectProvidersFromDom() {
+      return [...document.querySelectorAll(".provider")].map((el, i) => {
+        const src = state.providersFull[i] || {};
+        const get = (f) => el.querySelector(`[data-f="${f}"]`);
+        const modelsRaw = get("models").value || "";
+        return {
+          name: src.name || "unnamed",
+          base_url: get("base_url").value.trim(),
+          api_key: get("api_key").value.trim(),
+          models: modelsRaw.split(",").map((s) => s.trim()).filter(Boolean),
+          free_only: !!src.free_only,
+          weight: Number(get("weight").value || 1),
+          enabled: get("enabled").checked,
+        };
+      });
+    }
+
+    async function refresh() {
+      try {
+        const r = await fetch("/api/overview");
+        if (!r.ok) throw new Error("overview failed");
+        renderOverview(await r.json());
+      } catch (e) {
+        $("#liveDot").classList.remove("on");
+        $("#liveText").textContent = "无法连接网关";
+        toast("网关未启动或端口不对");
+      }
+      try {
+        const r = await fetch("/api/providers", { headers: authHeaders() });
+        if (r.ok) {
+          state.providersFull = await r.json();
+          renderProvidersEditor(state.providersFull);
+        }
+      } catch (_) {}
+    }
+
+    $("#localKey").value = state.localKey;
+    $("#btnToggleKey").onclick = () => {
+      const el = $("#localKey");
+      el.type = el.type === "password" ? "text" : "password";
+      $("#btnToggleKey").textContent = el.type === "password" ? "显示" : "隐藏";
+    };
+    $("#btnSaveKey").onclick = async () => {
+      const newKey = $("#localKey").value.trim();
+      const oldKey = state.localKey;
+      if (!newKey) {
+        toast("Key 不能为空");
+        return;
+      }
+      try {
+        const headers = {
+          "Authorization": `Bearer ${oldKey}`,
+          "Content-Type": "application/json",
+        };
+        const curResp = await fetch("/api/config", { headers });
+        if (!curResp.ok) throw new Error("auth");
+        const cur = await curResp.json();
+        cur.local_api_key = newKey;
+        const r = await fetch("/api/config", {
+          method: "PUT",
+          headers,
+          body: JSON.stringify(cur),
+        });
+        if (!r.ok) throw new Error(await r.text());
+        state.localKey = newKey;
+        localStorage.setItem("flg_local_key", newKey);
+        toast("本地 Key 已保存");
+        $("#wbSnippet").value = wbSnippet(state.overview?.openai_base || $("#baseUrl").textContent, state.localKey);
+        refresh();
+      } catch (e) {
+        toast("保存失败：请先用当前有效 Key 鉴权");
+      }
+    };
+    $("#btnSaveProviders").onclick = async () => {
+      try {
+        const body = collectProvidersFromDom();
+        const r = await fetch("/api/providers", {
+          method: "PUT",
+          headers: authHeaders(),
+          body: JSON.stringify(body),
+        });
+        if (!r.ok) throw new Error(await r.text());
+        toast("渠道已保存");
+        refresh();
+      } catch (e) {
+        toast("保存失败：检查本地 API Key");
+      }
+    };
+    $("#btnCopyBase").onclick = () => copyText($("#baseUrl").textContent.trim());
+    $("#btnCopyWb").onclick = () => copyText($("#wbSnippet").value);
+    $("#btnCopySnippet").onclick = () => copyText($("#wbSnippet").value);
+    $("#btnRefresh").onclick = refresh;
+    document.querySelectorAll("[data-copy]").forEach((btn) => {
+      btn.onclick = () => copyText(document.querySelector(btn.dataset.copy).textContent.trim());
+    });
+
     refresh();
-    setInterval(refresh, 10000);
+    setInterval(refresh, 12000);
   </script>
 </body>
 </html>
