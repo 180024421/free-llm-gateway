@@ -1,0 +1,31 @@
+{
+  "fast": {
+    "description": "偏快、适合日常对话",
+    "candidates": [
+      "meta/llama-3.1-8b-instruct",
+      "Qwen/Qwen2.5-72B-Instruct"
+    ]
+  },
+  "daily": {
+    "description": "综合路由，尽量长上下文",
+    "candidates": [
+      "nvidia/llama-3.1-nemotron-70b-instruct",
+      "Qwen/Qwen2.5-72B-Instruct",
+      "meta/llama-3.1-8b-instruct"
+    ]
+  },
+  "256k": {
+    "description": "兼容常见客户端习惯命名",
+    "candidates": [
+      "nvidia/llama-3.1-nemotron-70b-instruct",
+      "Qwen/Qwen2.5-72B-Instruct"
+    ]
+  },
+  "1m": {
+    "description": "优先大上下文模型（按你实际渠道改）",
+    "candidates": [
+      "nvidia/llama-3.1-nemotron-70b-instruct",
+      "Qwen/Qwen2.5-72B-Instruct"
+    ]
+  }
+}

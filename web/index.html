@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Free LLM Gateway</title>
+  <style>
+    :root {
+      --bg: #0f1419;
+      --panel: #1a2332;
+      --text: #e7ecf3;
+      --muted: #8b9bb4;
+      --ok: #3dd68c;
+      --bad: #ff6b6b;
+      --accent: #5b9fff;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+      background: radial-gradient(1200px 600px at 10% -10%, #1c2b44, var(--bg));
+      color: var(--text);
+      min-height: 100vh;
+      padding: 32px 20px 48px;
+    }
+    main { max-width: 920px; margin: 0 auto; }
+    h1 { font-size: 1.6rem; margin: 0 0 8px; }
+    p { color: var(--muted); line-height: 1.6; }
+    .grid { display: grid; gap: 16px; margin-top: 24px; }
+    .card {
+      background: color-mix(in srgb, var(--panel) 92%, white 8%);
+      border: 1px solid #2a3a52;
+      border-radius: 14px;
+      padding: 16px 18px;
+    }
+    code, pre {
+      font-family: ui-monospace, Consolas, monospace;
+      background: #0c1118;
+      border-radius: 8px;
+    }
+    code { padding: 2px 6px; }
+    pre { padding: 12px; overflow: auto; font-size: 0.85rem; }
+    .ok { color: var(--ok); }
+    .bad { color: var(--bad); }
+    button {
+      background: var(--accent);
+      color: #071018;
+      border: 0;
+      border-radius: 10px;
+      padding: 8px 14px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+    th, td { text-align: left; padding: 8px 6px; border-bottom: 1px solid #2a3a52; }
+    th { color: var(--muted); font-weight: 600; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Free LLM Gateway</h1>
+    <p>无授权、无过期。把 WorkBuddy / 其它 OpenAI 兼容客户端指到 <code>http://127.0.0.1:8010/v1</code>。</p>
+    <div class="grid">
+      <section class="card">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;">
+          <strong>运行状态</strong>
+          <button type="button" onclick="refresh()">刷新</button>
+        </div>
+        <p id="status">加载中…</p>
+        <pre id="health">{}</pre>
+      </section>
+      <section class="card">
+        <strong>WorkBuddy 对接示例</strong>
+        <pre>{
+  "id": "daily",
+  "name": "日常",
+  "vendor": "Custom",
+  "url": "http://127.0.0.1:8010/v1",
+  "apiKey": "（填 data/config.json 的 local_api_key）",
+  "supportsToolCall": true,
+  "maxInputTokens": 1048576,
+  "maxOutputTokens": 32768
+}</pre>
+      </section>
+      <section class="card">
+        <strong>渠道健康</strong>
+        <div style="overflow:auto;margin-top:8px;">
+          <table>
+            <thead>
+              <tr>
+                <th>Provider</th><th>Model</th><th>Score</th><th>Latency</th><th>状态</th>
+              </tr>
+            </thead>
+            <tbody id="channels"></tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+  </main>
+  <script>
+    async function refresh() {
+      const el = document.getElementById("status");
+      const pre = document.getElementById("health");
+      const tbody = document.getElementById("channels");
+      try {
+        const r = await fetch("/health");
+        const j = await r.json();
+        el.innerHTML = j.ok
+          ? `<span class="ok">正常</span> · 就绪渠道：${(j.providers_ready || []).join(", ") || "无"}`
+          : `<span class="bad">异常</span>`;
+        pre.textContent = JSON.stringify(j, null, 2);
+        tbody.innerHTML = "";
+        for (const c of (j.channels || [])) {
+          const tr = document.createElement("tr");
+          tr.innerHTML = `<td>${c.provider}</td><td>${c.model}</td><td>${c.score}</td><td>${c.last_latency_ms ?? "-"}</td><td>${c.circuit_open ? '<span class="bad">熔断</span>' : '<span class="ok">可用</span>'}</td>`;
+          tbody.appendChild(tr);
+        }
+      } catch (e) {
+        el.innerHTML = `<span class="bad">无法连接网关</span>`;
+        pre.textContent = String(e);
+      }
+    }
+    refresh();
+    setInterval(refresh, 10000);
+  </script>
+</body>
+</html>
