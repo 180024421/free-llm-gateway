@@ -366,8 +366,8 @@
     <section class="stats">
       <div class="stat"><div class="k">就绪渠道</div><div class="v" id="statReady">—</div><div class="hint" id="statReadyHint">填 Key 后生效</div></div>
       <div class="stat"><div class="k">路由组</div><div class="v" id="statRoutes">—</div><div class="hint">daily / fast / 256k…</div></div>
-      <div class="stat"><div class="k">监听端口</div><div class="v" id="statPort">—</div><div class="hint" id="statHost">127.0.0.1</div></div>
-      <div class="stat"><div class="k">版本</div><div class="v" id="statVer" style="font-size:1.35rem">—</div><div class="hint">MIT · 无激活</div></div>
+      <div class="stat"><div class="k">累计调用</div><div class="v" id="statCalls">—</div><div class="hint" id="statCallsHint">最近用量</div></div>
+      <div class="stat"><div class="k">版本</div><div class="v" id="statVer" style="font-size:1.35rem">—</div><div class="hint" id="statHost">127.0.0.1</div></div>
     </section>
 
     <section class="grid">
@@ -403,9 +403,12 @@
         <div class="row" style="justify-content:space-between;margin-bottom:8px">
           <div>
             <h2>上游渠道</h2>
-            <p class="desc" style="margin-bottom:0">在面板里改 Key / 开关，立即写入本机 providers.json。</p>
+            <p class="desc" style="margin-bottom:0">改 Key / 开关后保存；可单渠道探测连通性。</p>
           </div>
-          <button class="btn btn-primary" type="button" id="btnSaveProviders">保存渠道</button>
+          <div class="row">
+            <button class="btn btn-ghost" type="button" id="btnAddProvider">新增渠道</button>
+            <button class="btn btn-primary" type="button" id="btnSaveProviders">保存渠道</button>
+          </div>
         </div>
         <div id="providers"></div>
       </div>
@@ -421,6 +424,12 @@
             <tbody id="channels"><tr><td colspan="5" class="muted">尚无调用记录</td></tr></tbody>
           </table>
         </div>
+      </div>
+
+      <div class="panel">
+        <h2>用量概览</h2>
+        <p class="desc">本地 usage.jsonl 汇总（最近记录）。</p>
+        <div id="usageBox" class="muted tiny">暂无用量</div>
       </div>
 
       <div class="panel">
@@ -488,12 +497,25 @@
       $("#statReady").textContent = String(ready.length);
       $("#statReadyHint").textContent = ready.length ? ready.join(" / ") : "还没有可用 Key";
       $("#statRoutes").textContent = String(routes.length);
-      $("#statPort").textContent = String(j.config?.port ?? "—");
-      $("#statHost").textContent = j.config?.host || "127.0.0.1";
-      $("#statVer").textContent = j.version || "0.1.0";
+      const usage = j.usage || {};
+      $("#statCalls").textContent = String(usage.total ?? 0);
+      $("#statCallsHint").textContent = `成功 ${usage.ok ?? 0} · 端口 ${j.config?.port ?? "—"}`;
+      $("#statHost").textContent = `${j.config?.host || "127.0.0.1"} · MIT`;
+      $("#statVer").textContent = j.version || "0.2.1";
       $("#baseUrl").textContent = j.openai_base || "http://127.0.0.1:8010/v1";
       $("#keyMasked").textContent = j.config?.local_api_key_masked || "—";
 
+      const usageBox = $("#usageBox");
+      const by = usage.by_provider || {};
+      const names = Object.keys(by);
+      if (!names.length) {
+        usageBox.innerHTML = `<span class="muted">暂无用量。保存渠道后点「探测」或从客户端发一次请求。</span>`;
+      } else {
+        usageBox.innerHTML = names.map((n) => {
+          const s = by[n];
+          return `<div class="check-item pass" style="margin-bottom:8px"><div class="mark">●</div><div><strong>${n}</strong><div class="tiny muted">调用 ${s.calls} · 成功 ${s.ok} · tokens ${s.prompt_tokens}+${s.completion_tokens}</div></div></div>`;
+        }).join("");
+      }
       const chips = $("#routeChips");
       chips.innerHTML = "";
       (routes.length ? routes : ["daily", "fast"]).forEach((r) => {
@@ -544,10 +566,13 @@
       box.innerHTML = list.map((p, i) => `
         <div class="provider" data-idx="${i}">
           <header>
-            <h3>${p.name || "unnamed"}</h3>
-            <label class="tiny muted" style="display:flex;gap:8px;align-items:center;margin:0">
-              <input type="checkbox" data-f="enabled" ${p.enabled !== false ? "checked" : ""} /> 启用
-            </label>
+            <h3 contenteditable="true" data-f="name" style="outline:none">${p.name || "unnamed"}</h3>
+            <div class="row">
+              <button class="btn btn-ghost" type="button" data-probe="${i}" style="padding:8px 12px">探测</button>
+              <label class="tiny muted" style="display:flex;gap:8px;align-items:center;margin:0">
+                <input type="checkbox" data-f="enabled" ${p.enabled !== false ? "checked" : ""} /> 启用
+              </label>
+            </div>
           </header>
           <div class="field">
             <label>Base URL</label>
@@ -564,17 +589,22 @@
           <div class="row">
             <span class="chip">weight <input data-f="weight" type="number" value="${p.weight ?? 1}" style="width:64px;padding:4px 8px;margin-left:6px" /></span>
             <span class="chip">${p.free_only ? "free_only" : "mixed"}</span>
+            <span class="chip" data-probe-result="${i}">未探测</span>
           </div>
         </div>`).join("");
+      box.querySelectorAll("[data-probe]").forEach((btn) => {
+        btn.onclick = () => probeOne(Number(btn.dataset.probe));
+      });
     }
 
     function collectProvidersFromDom() {
       return [...document.querySelectorAll(".provider")].map((el, i) => {
         const src = state.providersFull[i] || {};
         const get = (f) => el.querySelector(`[data-f="${f}"]`);
+        const nameEl = get("name");
         const modelsRaw = get("models").value || "";
         return {
-          name: src.name || "unnamed",
+          name: (nameEl?.textContent || src.name || "unnamed").trim(),
           base_url: get("base_url").value.trim(),
           api_key: get("api_key").value.trim(),
           models: modelsRaw.split(",").map((s) => s.trim()).filter(Boolean),
@@ -585,6 +615,33 @@
       });
     }
 
+    async function probeOne(idx) {
+      const list = collectProvidersFromDom();
+      state.providersFull = list;
+      const name = list[idx]?.name;
+      const chip = document.querySelector(`[data-probe-result="${idx}"]`);
+      if (chip) chip.textContent = "探测中…";
+      try {
+        await fetch("/api/providers", {
+          method: "PUT",
+          headers: authHeaders(),
+          body: JSON.stringify(list),
+        });
+        const r = await fetch("/api/probe", {
+          method: "POST",
+          headers: authHeaders(),
+          body: JSON.stringify({ name }),
+        });
+        const j = await r.json();
+        if (!r.ok) throw new Error(j.detail || "probe failed");
+        if (chip) chip.textContent = j.ok ? `OK ${j.latency_ms || 0}ms` : `失败`;
+        toast(j.ok ? `${name} 探测成功` : `${name} 探测失败`);
+        refresh();
+      } catch (e) {
+        if (chip) chip.textContent = "失败";
+        toast("探测失败：检查 Key / 网络");
+      }
+    }
     async function refresh() {
       try {
         const r = await fetch("/api/overview");
@@ -655,6 +712,21 @@
       } catch (e) {
         toast("保存失败：检查本地 API Key");
       }
+    };
+    $("#btnAddProvider").onclick = () => {
+      const list = collectProvidersFromDom();
+      list.push({
+        name: `Provider-${list.length + 1}`,
+        base_url: "https://api.example.com/v1",
+        api_key: "",
+        models: ["demo-model"],
+        free_only: true,
+        weight: 1,
+        enabled: true,
+      });
+      state.providersFull = list;
+      renderProvidersEditor(list);
+      toast("已添加空渠道，填好后点保存");
     };
     $("#btnCopyBase").onclick = () => copyText($("#baseUrl").textContent.trim());
     $("#btnCopyWb").onclick = () => copyText($("#wbSnippet").value);

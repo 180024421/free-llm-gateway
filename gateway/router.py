@@ -39,35 +39,51 @@ def resolve_candidates(
     routers: dict[str, Any],
 ) -> list[tuple[dict[str, Any], str]]:
     """Return ordered (provider, upstream_model) candidates."""
+    # case-insensitive route lookup
     route = routers.get(model)
+    if route is None:
+        lower = model.lower()
+        for k, v in routers.items():
+            if str(k).lower() == lower:
+                route = v
+                break
+
     wanted: list[str]
     if isinstance(route, dict) and route.get("candidates"):
         wanted = list(route["candidates"])
     else:
         wanted = [model]
 
+    # also allow case-insensitive match against provider model ids
+    def model_in(models: list[Any], name: str) -> bool:
+        if name in models:
+            return True
+        lower = name.lower()
+        return any(str(m).lower() == lower for m in models)
+
     pairs: list[tuple[dict[str, Any], str, float]] = []
     for upstream_model in wanted:
         for p in _enabled_providers(providers):
             models = p.get("models") or []
-            if upstream_model not in models:
+            if not model_in(models, upstream_model):
                 continue
-            h = STATE.get(p.get("name") or "?", upstream_model)
+            # use the provider's canonical casing
+            canon = next((m for m in models if str(m).lower() == upstream_model.lower()), upstream_model)
+            h = STATE.get(p.get("name") or "?", canon)
             weight = float(p.get("weight") or 1)
             score = h.score(weight)
             if score <= 0:
                 continue
-            pairs.append((p, upstream_model, score))
+            pairs.append((p, canon, score))
 
     if not pairs:
-        # last resort: ignore circuit breaker, still skip empty keys
         for upstream_model in wanted:
             for p in _enabled_providers(providers):
                 models = p.get("models") or []
-                if upstream_model in models:
-                    pairs.append((p, upstream_model, 0.01))
+                if model_in(models, upstream_model):
+                    canon = next((m for m in models if str(m).lower() == upstream_model.lower()), upstream_model)
+                    pairs.append((p, canon, 0.01))
 
-    # weighted shuffle: sample without replacement by score
     remaining = pairs[:]
     ordered: list[tuple[dict[str, Any], str]] = []
     while remaining:

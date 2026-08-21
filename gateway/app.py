@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import time
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Optional
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 
 from . import __version__
 from .config import (
@@ -19,11 +21,18 @@ from .config import (
     save_providers,
     save_routers,
 )
-from .proxy import forward_chat
+from .proxy import aclose_http_client, forward_chat, probe_provider, usage_summary
 from .router import list_upstream_models, resolve_candidates
 from .state import STATE
 
-app = FastAPI(title="Free LLM Gateway", version=__version__)
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    yield
+    await aclose_http_client()
+
+
+app = FastAPI(title="Free LLM Gateway", version=__version__, lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -56,11 +65,15 @@ def _public_base(request: Request) -> str:
     if host in ("0.0.0.0", "::"):
         host = request.url.hostname or "127.0.0.1"
     port = int(cfg.get("port") or 8010)
-    return f"http://{host}:{port}"
+    scheme = request.url.scheme or "http"
+    return f"{scheme}://{host}:{port}"
 
 
 @app.get("/")
-def root(request: Request) -> dict[str, Any]:
+def root(request: Request):
+    accept = (request.headers.get("accept") or "").lower()
+    if "text/html" in accept:
+        return RedirectResponse(url="/ui/", status_code=307)
     base = _public_base(request)
     return {
         "name": "free-llm-gateway",
@@ -77,6 +90,7 @@ def health(request: Request) -> dict[str, Any]:
     data = overview_payload(_public_base(request))
     data["version"] = __version__
     data["channels"] = STATE.snapshot()
+    data["usage"] = usage_summary(200)
     return data
 
 
@@ -85,7 +99,33 @@ def api_overview(request: Request) -> dict[str, Any]:
     data = overview_payload(_public_base(request))
     data["version"] = __version__
     data["channels"] = STATE.snapshot()
+    data["usage"] = usage_summary(300)
     return data
+
+
+@app.get("/api/usage")
+def api_usage(_: None = Depends(_auth)) -> dict[str, Any]:
+    return usage_summary(1000)
+
+
+@app.post("/api/probe")
+async def api_probe(request: Request, _: None = Depends(_auth)) -> dict[str, Any]:
+    body = await request.json()
+    name = (body or {}).get("name") if isinstance(body, dict) else None
+    providers = load_providers()
+    target = None
+    if name:
+        for p in providers:
+            if p.get("name") == name:
+                target = p
+                break
+    elif providers:
+        target = next((p for p in providers if (p.get("api_key") or "").strip() and not str(p.get("api_key")).startswith("REPLACE_")), None)
+    if not target:
+        raise HTTPException(status_code=404, detail="provider not found or not configured")
+    cfg = load_config()
+    timeout = float(cfg.get("request_timeout_sec") or 120)
+    return await probe_provider(target, timeout_sec=min(60.0, timeout))
 
 
 @app.post("/admin/reload")
@@ -162,8 +202,7 @@ async def put_routers(request: Request, _: None = Depends(_auth)) -> dict[str, A
     return {"status": "saved", "routes": list(body.keys())}
 
 
-@app.get("/v1/models")
-def models(_: None = Depends(_auth)) -> dict[str, Any]:
+def _models_payload() -> dict[str, Any]:
     providers = load_providers()
     routers = load_routers()
     data = []
@@ -190,7 +229,18 @@ def models(_: None = Depends(_auth)) -> dict[str, Any]:
     return {"object": "list", "data": data}
 
 
+@app.get("/v1/models")
+def models(_: None = Depends(_auth)) -> dict[str, Any]:
+    return _models_payload()
+
+
+@app.get("/models")
+def models_alias(_: None = Depends(_auth)) -> dict[str, Any]:
+    return _models_payload()
+
+
 @app.post("/v1/chat/completions")
+@app.post("/chat/completions")
 async def chat_completions(request: Request, _: None = Depends(_auth)):
     cfg, providers, routers = reload_all()
     body = await request.json()
@@ -222,6 +272,7 @@ async def chat_completions(request: Request, _: None = Depends(_auth)):
         gateway_headers = {
             "X-Gateway-Provider": str(meta.get("provider")),
             "X-Gateway-Model": str(meta.get("upstream_model")),
+            "X-Request-Id": str(meta.get("request_id") or ""),
         }
         if stream:
             if stream_iter is not None:
@@ -244,17 +295,11 @@ async def chat_completions(request: Request, _: None = Depends(_auth)):
             )
             continue
 
-        if resp is not None and resp.status_code < 400:
+        if resp is not None and (meta.get("status_code") or resp.status_code) < 400:
             raw = meta.get("_raw")
-            client = meta.get("_client")
-            try:
-                if isinstance(raw, dict):
-                    return JSONResponse(content=raw, headers=gateway_headers)
-                return JSONResponse(content={"raw": raw}, headers=gateway_headers)
-            finally:
-                if client is not None:
-                    await client.aclose()
-                await resp.aclose()
+            if isinstance(raw, dict):
+                return JSONResponse(content=raw, headers=gateway_headers)
+            return JSONResponse(content={"raw": raw}, headers=gateway_headers)
 
         errors.append(
             {
@@ -270,9 +315,6 @@ async def chat_completions(request: Request, _: None = Depends(_auth)):
         detail={"message": "All upstream candidates failed", "errors": errors},
     )
 
-
-# Mount UI last so API routes win
-from fastapi.staticfiles import StaticFiles
 
 _WEB_DIR = Path(__file__).resolve().parent.parent / "web"
 if _WEB_DIR.exists():
