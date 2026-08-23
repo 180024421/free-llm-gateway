@@ -76,7 +76,14 @@ def load_config() -> dict[str, Any]:
 
 def load_providers() -> list[dict[str, Any]]:
     raw = _cached_load("providers.json", [])
-    return list(raw) if isinstance(raw, list) else []
+    items = list(raw) if isinstance(raw, list) else []
+    try:
+        from .secrets import reveal_providers
+
+        cfg = dict(_cached_load("config.json", {}))
+        return reveal_providers(items, cfg=cfg)
+    except Exception:
+        return items
 
 
 def load_routers() -> dict[str, Any]:
@@ -89,7 +96,14 @@ def save_config(cfg: dict[str, Any]) -> None:
 
 
 def save_providers(providers: list[dict[str, Any]]) -> None:
-    save_json(DATA_DIR / "providers.json", providers)
+    cfg = load_config()
+    try:
+        from .secrets import scrub_providers_for_save
+
+        data = scrub_providers_for_save(providers, cfg=cfg)
+    except Exception:
+        data = providers
+    save_json(DATA_DIR / "providers.json", data)
 
 
 def save_routers(routers: dict[str, Any]) -> None:
@@ -115,7 +129,13 @@ def provider_is_ready(p: dict[str, Any]) -> bool:
     if not p.get("enabled", True):
         return False
     key = (p.get("api_key") or "").strip()
-    if not key or key.startswith("REPLACE_"):
+    if (
+        not key
+        or key.startswith("REPLACE_")
+        or "YOUR_KEY" in key
+        or "change-me" in key.lower()
+        or key.lower() in ("sk-xxx", "your_api_key", "none")
+    ):
         return False
     return bool(p.get("models"))
 
@@ -133,6 +153,15 @@ def overview_payload(base_url: str) -> dict[str, Any]:
             "port": cfg.get("port"),
             "local_api_key_masked": mask_secret(cfg.get("local_api_key")),
             "local_api_key_set": bool((cfg.get("local_api_key") or "").strip()),
+            "novel_preferred_provider": cfg.get("novel_preferred_provider") or "auto",
+            "novel_stream_mode": cfg.get("novel_stream_mode") or "safe",
+            "encrypt_provider_keys": cfg.get("encrypt_provider_keys", True),
+            "workbuddy_enable_agent_teams": bool(cfg.get("workbuddy_enable_agent_teams", False)),
+            "fast_hedged_requests": bool(cfg.get("fast_hedged_requests", True)),
+            "fast_hedge_candidates": cfg.get("fast_hedge_candidates", 2),
+            "provider_max_concurrent": cfg.get("provider_max_concurrent", 4),
+            "provider_concurrency_limit": bool(cfg.get("provider_concurrency_limit", True)),
+            "usage_async_write": bool(cfg.get("usage_async_write", True)),
             "request_timeout_sec": cfg.get("request_timeout_sec"),
             "max_retries_per_request": cfg.get("max_retries_per_request"),
         },

@@ -31,6 +31,10 @@
         "title": "大帅网关: 复制 API Base URL"
       },
       {
+        "command": "dashuai.pickRoute",
+        "title": "大帅网关: 切换用途路由"
+      },
+      {
         "command": "dashuai.applyCursorHint",
         "title": "大帅网关: 显示 Cursor / Continue 接入说明"
       }
@@ -68,8 +72,14 @@
         },
         "dashuai.model": {
           "type": "string",
-          "default": "daily",
-          "description": "默认路由模型名（daily / fast / 256k / 1m）"
+          "default": "日常",
+          "enum": ["日常", "快速", "复杂", "小说", "代码", "识图", "翻译", "总结", "推理", "长文", "Agent", "daily", "fast", "novel"],
+          "description": "用途路由名（11 类中文或 daily/fast 别名）"
+        },
+        "dashuai.stream": {
+          "type": "boolean",
+          "default": true,
+          "description": "侧栏问答使用流式输出"
         },
         "dashuai.dashboardUrl": {
           "type": "string",

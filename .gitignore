@@ -11,12 +11,16 @@ data/routers.json
 data/usage.jsonl
 data/history.jsonl
 data/*.bak
+data/_import_*.json
 .idea/
 .vscode/
 *.log
 dist/
+dist-share/
 dist-installer/
 build/
+tools/innosetup/
+*.exe
 *.egg-info/
 .DS_Store
 Thumbs.db
@@ -29,3 +33,9 @@ clients/android/local.properties
 clients/idea/.gradle/
 clients/idea/build/
 .pytest_cache/
+
+scripts/_tmp_*
+scripts/_asar_scan_out.txt
+scripts/_teams_out.txt
+packaging/_ui_bundle.html
+

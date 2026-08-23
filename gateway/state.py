@@ -35,6 +35,12 @@ class ChannelHealth:
         self.last_ok_at = time.time()
         self.last_error = None
         self.open_until = 0.0
+        try:
+            from .channel_store import schedule_save
+
+            schedule_save(STATE)
+        except Exception:
+            pass
 
     def mark_fail(self, error: str, cooldown_sec: float = 30.0) -> None:
         self.failures += 1
@@ -44,6 +50,12 @@ class ChannelHealth:
         # exponential-ish cooldown
         factor = min(8, 2 ** max(0, self.consecutive_failures - 1))
         self.open_until = time.time() + cooldown_sec * factor / 2
+        try:
+            from .channel_store import schedule_save
+
+            schedule_save(STATE)
+        except Exception:
+            pass
 
 
 @dataclass
@@ -64,8 +76,21 @@ class RuntimeState:
     def snapshot(self) -> list[dict[str, Any]]:
         with self.lock:
             out = []
+            now = time.time()
             for k, h in self.health.items():
                 provider, model = k.split("::", 1)
+                remain = max(0.0, float(getattr(h, "open_until", 0.0) - now))
+                err = h.last_error
+                kind = "ok"
+                if remain > 0:
+                    kind = "cooldown"
+                try:
+                    from .ops import classify_error
+
+                    if err:
+                        kind = classify_error(err) if remain > 0 or (h.failures and not h.successes) else classify_error(err)
+                except Exception:
+                    pass
                 out.append(
                     {
                         "provider": provider,
@@ -75,7 +100,10 @@ class RuntimeState:
                         "consecutive_failures": h.consecutive_failures,
                         "last_latency_ms": h.last_latency_ms,
                         "last_error": h.last_error,
-                        "circuit_open": time.time() < h.open_until,
+                        "circuit_open": remain > 0,
+                        "cooldown_remaining_sec": round(remain, 1),
+                        "open_until": getattr(h, "open_until", 0.0),
+                        "error_kind": kind if err else ("cooldown" if remain > 0 else "ok"),
                         "score": round(h.score(), 4),
                     }
                 )

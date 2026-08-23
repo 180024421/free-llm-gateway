@@ -1,8 +1,85 @@
 {
+
   "host": "127.0.0.1",
+
   "port": 8010,
+
   "local_api_key": "sk-local-change-me",
+
   "request_timeout_sec": 120,
-  "max_retries_per_request": 4,
-  "health_probe_interval_sec": 60
+
+  "max_retries_per_request": 3,
+
+  "health_probe_interval_sec": 60,
+
+  "stream_stall_sec": 8,
+
+  "tool_request_timeout_sec": 180,
+
+  "tool_stream_stall_sec": 20,
+
+  "fast_stream_stall_sec": 5,
+
+  "fast_tool_stream_stall_sec": 8,
+
+  "fast_tool_request_timeout_sec": 60,
+
+  "fast_request_timeout_sec": 20,
+
+  "fast_max_retries": 3,
+
+  "workbuddy_enable_agent_teams": false,
+
+  "fast_hedged_requests": true,
+
+  "fast_hedge_candidates": 2,
+
+  "fast_hedge_with_tools": false,
+
+  "provider_max_concurrent": 4,
+
+  "provider_concurrency_limit": true,
+
+  "usage_async_write": true,
+
+  "novel_preferred_provider": "auto",
+
+  "novel_stream_mode": "safe",
+
+  "encrypt_provider_keys": true,
+
+  "complex_stream_stall_sec": 30,
+
+  "complex_tool_stream_stall_sec": 45,
+
+  "complex_request_timeout_sec": 180,
+
+  "complex_tool_request_timeout_sec": 240,
+
+  "complex_max_retries": 5,
+
+  "novel_stream_stall_sec": 60,
+
+  "novel_request_timeout_sec": 360,
+
+  "novel_max_retries": 6,
+  "novel_fallback_daily": true,
+
+  "code_stream_stall_sec": 20,
+
+  "code_tool_stream_stall_sec": 35,
+
+  "code_request_timeout_sec": 120,
+
+  "code_tool_request_timeout_sec": 180,
+
+  "code_max_retries": 4,
+
+  "license_api_base": "http://111.229.202.251/api",
+
+  "license_project_id": 4,
+
+  "require_license": true
+
 }
+

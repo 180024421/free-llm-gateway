@@ -1,72 +1,68 @@
 [
   {
-    "id": "fast",
+    "id": "日常",
+    "name": "日常 · 大帅网关",
+    "vendor": "Custom",
+    "url": "http://127.0.0.1:8010/v1",
+    "apiKey": "sk-local-change-me",
+    "temperature": 0,
+    "supportsToolCall": true,
+    "supportsImages": true,
+    "supportsReasoning": true,
+    "useCustomProtocol": false,
+    "onlyReasoning": false,
+    "maxInputTokens": 1048576,
+    "maxOutputTokens": 65536,
+    "reasoning": {
+      "effort": "",
+      "defaultEffort": "high",
+      "supportedEfforts": ["low", "medium", "high"],
+      "summary": "auto",
+      "canDisableThinking": true
+    }
+  },
+  {
+    "id": "快速",
     "name": "快速 · 大帅网关",
     "vendor": "Custom",
     "url": "http://127.0.0.1:8010/v1",
     "apiKey": "sk-local-change-me",
+    "temperature": 0,
     "supportsToolCall": true,
     "supportsImages": false,
     "supportsReasoning": true,
     "useCustomProtocol": false,
     "onlyReasoning": false,
     "maxInputTokens": 262144,
-    "maxOutputTokens": 32768
+    "maxOutputTokens": 32768,
+    "reasoning": {
+      "effort": "",
+      "defaultEffort": "high",
+      "supportedEfforts": ["low", "medium", "high"],
+      "summary": "auto",
+      "canDisableThinking": true
+    }
   },
   {
-    "id": "daily",
-    "name": "日常 · 大帅网关",
-    "vendor": "Custom",
-    "url": "http://127.0.0.1:8010/v1",
-    "apiKey": "sk-local-change-me",
-    "supportsToolCall": true,
-    "supportsImages": true,
-    "supportsReasoning": true,
-    "useCustomProtocol": false,
-    "onlyReasoning": false,
-    "maxInputTokens": 1048576,
-    "maxOutputTokens": 32768
-  },
-  {
-    "id": "256k",
-    "name": "256K · 大帅网关",
-    "vendor": "Custom",
-    "url": "http://127.0.0.1:8010/v1",
-    "apiKey": "sk-local-change-me",
-    "supportsToolCall": true,
-    "supportsImages": true,
-    "supportsReasoning": true,
-    "useCustomProtocol": false,
-    "onlyReasoning": false,
-    "maxInputTokens": 262144,
-    "maxOutputTokens": 32768
-  },
-  {
-    "id": "1m",
-    "name": "1M · 大帅网关",
-    "vendor": "Custom",
-    "url": "http://127.0.0.1:8010/v1",
-    "apiKey": "sk-local-change-me",
-    "supportsToolCall": true,
-    "supportsImages": true,
-    "supportsReasoning": true,
-    "useCustomProtocol": false,
-    "onlyReasoning": false,
-    "maxInputTokens": 1048576,
-    "maxOutputTokens": 32768
-  },
-  {
-    "id": "vision",
+    "id": "识图",
     "name": "识图 · 大帅网关",
     "vendor": "Custom",
     "url": "http://127.0.0.1:8010/v1",
     "apiKey": "sk-local-change-me",
+    "temperature": 0,
     "supportsToolCall": true,
     "supportsImages": true,
     "supportsReasoning": false,
     "useCustomProtocol": false,
     "onlyReasoning": false,
     "maxInputTokens": 131072,
-    "maxOutputTokens": 16384
+    "maxOutputTokens": 16384,
+    "reasoning": {
+      "effort": "",
+      "defaultEffort": "",
+      "supportedEfforts": [],
+      "summary": "auto",
+      "canDisableThinking": true
+    }
   }
 ]

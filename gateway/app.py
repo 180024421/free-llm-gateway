@@ -15,16 +15,75 @@ from .config import (
     load_config,
     load_providers,
     load_routers,
+    mask_secret,
     overview_payload,
     reload_all,
     save_config,
     save_providers,
     save_routers,
 )
-from .proxy import aclose_http_client, forward_chat, probe_provider, usage_summary
+from .poller import check_all, get_poll_status, latest_health, load_latest_history
+from .route_builder import rebuild_and_save
+from .proxy import (
+    aclose_http_client,
+    call_log,
+    forward_chat,
+    is_coding_route,
+    is_complex_route,
+    is_fast_route,
+    is_novel_route,
+    prepare_body_for_upstream,
+    probe_provider,
+    usage_csv,
+    usage_for_ui,
+    usage_summary,
+)
 from .router import list_upstream_models, resolve_candidates
+from .channel_store import apply_to_state
+from .chat_dispatch import race_first_success
+from .concurrency import provider_limit_from_config, provider_slot
 from .state import STATE
-from .workbuddy import sync_workbuddy, workbuddy_status
+from .ops import (
+    autostart_status,
+    archive_usage_now,
+    backup_config_zip,
+    bootstrap_for_ui,
+    classify_error,
+    clear_usage_now,
+    enrich_error_entry,
+    is_loopback_host,
+    list_backups,
+    list_usage_archives,
+    recent_failures,
+    remediation_hint,
+    restore_config_zip,
+    set_autostart,
+)
+from .workbuddy import diagnose_workbuddy, sync_workbuddy, workbuddy_status
+from .license import (
+    cache_entitlement,
+    clear_session,
+    entitlement_snapshot,
+    flush_pending_usage,
+    jane_request,
+    license_required,
+    load_session,
+    refresh_status,
+    require_entitlement,
+    save_session,
+)
+
+
+def _ascii_header(value: Any) -> str:
+    """Starlette encodes response headers as latin-1; quote Chinese names (e.g. 魔搭)."""
+    s = str(value or "")
+    try:
+        s.encode("latin-1")
+        return s
+    except UnicodeEncodeError:
+        from urllib.parse import quote
+
+        return quote(s, safe="._-/:+=@")
 
 
 def _assistant_text(raw: Any) -> str:
@@ -53,35 +112,174 @@ def _usable_chat_payload(raw: Any) -> bool:
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    try:
+        apply_to_state(STATE)
+    except Exception:
+        pass
+    # Push current routes into WorkBuddy on every gateway start.
+    try:
+        sync_workbuddy(auto=True)
+    except Exception:
+        pass
+
+    async def _license_warmup() -> None:
+        try:
+            await flush_pending_usage()
+            if license_required():
+                await refresh_status(force=True)
+        except Exception:
+            pass
+
+    async def _health_probe_loop() -> None:
+        import asyncio
+
+        while True:
+            cfg = load_config()
+            interval = int(cfg.get("health_probe_interval_sec") or 0)
+            if interval <= 0:
+                await asyncio.sleep(120)
+                continue
+            await asyncio.sleep(max(30, interval))
+            try:
+                await check_all(quiet=True)
+            except Exception:
+                pass
+            try:
+                rebuild_and_save()
+            except Exception:
+                pass
+
+    # Do not block server ready / desktop window on remote license calls
+    try:
+        import asyncio
+
+        from .usage_queue import start_usage_writer
+
+        start_usage_writer()
+        asyncio.create_task(_license_warmup())
+        asyncio.create_task(_health_probe_loop())
+    except Exception:
+        pass
     yield
+    try:
+        from .usage_queue import stop_usage_writer
+
+        stop_usage_writer(flush=True)
+    except Exception:
+        pass
     await aclose_http_client()
 
 
 app = FastAPI(title=__product__, version=__version__, lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "http://127.0.0.1:8010",
+        "http://localhost:8010",
+        "http://127.0.0.1:8011",
+        "http://localhost:8011",
+    ],
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+@app.middleware("http")
+async def require_localhost_for_ops(request: Request, call_next):
+    """Sensitive stats/ops endpoints are loopback-only."""
+    p = request.url.path or ""
+    guarded = (
+        p.startswith("/api/usage")
+        or p.startswith("/api/call-log")
+        or p.startswith("/api/bootstrap")
+        or p.startswith("/api/health-board")
+        or p.startswith("/api/ops/")
+        or p.startswith("/api/integrations/workbuddy/diagnose")
+    )
+    if guarded:
+        host = request.client.host if request.client else ""
+        # Starlette TestClient reports host as "testclient"
+        if host not in ("testclient", "testserver") and not is_loopback_host(host):
+            return JSONResponse({"detail": "localhost only"}, status_code=403)
+    return await call_next(request)
+
+
+_MAINT_CACHE: dict[str, Any] = {"ts": 0.0, "enabled": False, "message": ""}
+
+
+async def ensure_not_maintenance() -> None:
+    cfg = load_config()
+    if not license_required(cfg):
+        return
+    now = time.time()
+    if now - float(_MAINT_CACHE.get("ts") or 0) < 300:
+        if _MAINT_CACHE.get("enabled"):
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": "MAINTENANCE",
+                    "message": str(_MAINT_CACHE.get("message") or "系统维护中，请稍后再试"),
+                },
+            )
+        return
+    enabled = False
+    message = ""
+    if (cfg.get("license_api_base") or "").strip():
+        try:
+            data = await jane_request("GET", "/gateway/meta/bootstrap", timeout=6.0)
+            if isinstance(data, dict):
+                enabled = bool(data.get("maintenanceEnabled") or data.get("maintenance_enabled"))
+                message = str(data.get("maintenanceMessage") or data.get("maintenance_message") or "")
+        except Exception:
+            pass
+    _MAINT_CACHE.update(ts=now, enabled=enabled, message=message)
+    if enabled:
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "MAINTENANCE", "message": message or "系统维护中，请稍后再试"},
+        )
+
 
 def _auth(
     authorization: Optional[str] = Header(default=None),
     x_api_key: Optional[str] = Header(default=None, alias="x-api-key"),
+    api_key: Optional[str] = Header(default=None, alias="api-key"),
 ) -> None:
     cfg = load_config()
     expected = (cfg.get("local_api_key") or "").strip()
     if not expected:
         return
-    token = None
-    if authorization and authorization.lower().startswith("bearer "):
-        token = authorization[7:].strip()
-    elif x_api_key:
-        token = x_api_key.strip()
-    if token != expected:
-        raise HTTPException(status_code=401, detail="Invalid API key")
+
+    candidates: list[str] = []
+    if authorization:
+        auth = authorization.strip()
+        low = auth.lower()
+        if low.startswith("bearer "):
+            candidates.append(auth[7:].strip())
+        else:
+            # Some clients send raw key in Authorization
+            candidates.append(auth)
+    if x_api_key:
+        candidates.append(x_api_key.strip())
+    if api_key:
+        candidates.append(api_key.strip())
+
+    for token in candidates:
+        # tolerate accidental quotes / Bearer prefix in the key field itself
+        t = token.strip().strip('"').strip("'")
+        if t.lower().startswith("bearer "):
+            t = t[7:].strip()
+        if t == expected:
+            return
+
+    raise HTTPException(
+        status_code=401,
+        detail={
+            "code": "LOCAL_KEY_MISMATCH",
+            "message": "本地 API Key 不正确",
+            "hint": "WorkBuddy 的 apiKey 必须与网关一致。请在面板点「同步 WorkBuddy」，然后完全退出并重启 WorkBuddy（任务栏右键退出）。",
+        },
+    )
 
 
 def _public_base(request: Request) -> str:
@@ -108,7 +306,7 @@ def root(request: Request):
         "openai_base": f"{base}/v1",
         "ui": f"{base}/ui/",
         "health": f"{base}/health",
-        "license": "none - no expiry, no activation",
+        "license": entitlement_snapshot() if license_required() else "none - require_license off",
     }
 
 
@@ -118,6 +316,8 @@ def health(request: Request) -> dict[str, Any]:
     data["version"] = __version__
     data["channels"] = STATE.snapshot()
     data["usage"] = usage_summary(200)
+    data["health"] = latest_health() or load_latest_history()
+    data["poll_status"] = get_poll_status()
     return data
 
 
@@ -127,18 +327,164 @@ def api_overview(request: Request) -> dict[str, Any]:
     data["version"] = __version__
     data["channels"] = STATE.snapshot()
     data["usage"] = usage_summary(300)
+    data["health"] = latest_health() or load_latest_history()
+    data["poll_status"] = get_poll_status()
+    data["license"] = entitlement_snapshot()
+    data["recent_failures"] = recent_failures(5)
     return data
 
 
 @app.get("/api/usage")
-def api_usage(_: None = Depends(_auth)) -> dict[str, Any]:
-    return usage_summary(1000)
+def api_usage(days: int = 1) -> dict[str, Any]:
+    """Local usage aggregate (no auth — read-only stats for UI). ?days=1|7|30"""
+    d = max(1, min(90, int(days or 1)))
+    return usage_for_ui(d)
+
+
+@app.get("/api/call-log")
+def api_call_log(limit: int = 100, route: str | None = None) -> list[dict[str, Any]]:
+    """Recent calls (localhost-only). Optional ?route= filter."""
+    return call_log(max(1, min(500, int(limit or 100))), route=route)
+
+
+@app.get("/api/usage.csv")
+def api_usage_csv(days: int = 7):
+    from fastapi.responses import PlainTextResponse
+
+    d = max(1, min(90, int(days or 7)))
+    return PlainTextResponse(
+        usage_csv(d),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="usage-{d}d.csv"'},
+    )
+
+
+@app.get("/api/bootstrap")
+def api_bootstrap() -> dict[str, Any]:
+    return bootstrap_for_ui()
+
+
+@app.get("/api/health-board")
+def api_health_board() -> dict[str, Any]:
+    channels = STATE.snapshot()
+    cooling = [c for c in channels if c.get("circuit_open")]
+    fails = recent_failures(20)
+    return {
+        "channels": channels,
+        "cooling": cooling,
+        "cooling_count": len(cooling),
+        "recent_failures": fails,
+        # aliases used by UI enhance layer
+        "cooling_models": cooling,
+        "recent_fails": fails,
+    }
+
+
+@app.get("/api/ops/autostart")
+def api_autostart_get() -> dict[str, Any]:
+    return autostart_status()
+
+
+@app.post("/api/ops/autostart")
+async def api_autostart_set(request: Request) -> dict[str, Any]:
+    body = {}
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    return set_autostart(bool((body or {}).get("enabled")))
+
+
+@app.get("/api/ops/backups")
+def api_backups_list() -> dict[str, Any]:
+    return {"items": list_backups()}
+
+
+@app.get("/api/ops/usage/archives")
+def api_usage_archives_list() -> dict[str, Any]:
+    return {"items": list_usage_archives()}
+
+
+@app.post("/api/ops/usage/archive")
+def api_usage_archive(_: None = Depends(_auth)) -> dict[str, Any]:
+    return archive_usage_now()
+
+
+@app.post("/api/ops/usage/clear")
+def api_usage_clear(_: None = Depends(_auth)) -> dict[str, Any]:
+    return clear_usage_now()
+
+
+@app.post("/api/license/flush-usage")
+async def api_license_flush_usage(_: None = Depends(_auth)) -> dict[str, Any]:
+    await flush_pending_usage()
+    snap = entitlement_snapshot()
+    return {
+        "ok": True,
+        "pending_usage_count": snap.get("pending_usage_count") or 0,
+        "message": snap.get("pending_usage_last_error") or "已尝试上报待同步用量",
+    }
+
+
+@app.get("/api/update/check")
+async def api_update_check() -> dict[str, Any]:
+    meta = await api_remote_bootstrap()
+    local = __version__
+    latest = str(meta.get("latestVersion") or local)
+    return {
+        "local_version": local,
+        "latest_version": latest,
+        "update_available": str(latest) != str(local),
+        "download_url": meta.get("downloadUrl") or "",
+        "download_sha256": meta.get("downloadSha256") or meta.get("download_sha256") or "",
+        "maintenance": bool(meta.get("maintenanceEnabled")),
+    }
+
+
+@app.post("/api/ops/backup")
+def api_backup_create(_: None = Depends(_auth)) -> dict[str, Any]:
+    p = backup_config_zip()
+    return {"ok": True, "path": str(p), "name": p.name}
+
+
+@app.post("/api/ops/restore")
+async def api_backup_restore(request: Request, _: None = Depends(_auth)) -> dict[str, Any]:
+    body = await request.json()
+    name = str((body or {}).get("name") or "").strip()
+    if not name or "/" in name or "\\" in name or ".." in name:
+        raise HTTPException(status_code=400, detail="invalid backup name")
+    from .config import DATA_DIR
+
+    return restore_config_zip(DATA_DIR / "backups" / name)
+
+
+@app.get("/api/integrations/workbuddy/diagnose")
+def api_workbuddy_diagnose() -> dict[str, Any]:
+    return diagnose_workbuddy()
+
+
+
+
+@app.get("/api/poll-status")
+def api_poll_status(_: None = Depends(_auth)) -> dict[str, Any]:
+    return get_poll_status()
+
+
+@app.post("/api/check/all")
+async def api_check_all(_: None = Depends(_auth)) -> dict[str, Any]:
+    """One-click probe all enabled models (commercial「立即检测」)."""
+    return await check_all(concurrency=4)
 
 
 @app.post("/api/probe")
 async def api_probe(request: Request, _: None = Depends(_auth)) -> dict[str, Any]:
-    body = await request.json()
-    name = (body or {}).get("name") if isinstance(body, dict) else None
+    body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+    if not isinstance(body, dict):
+        body = {}
+    if body.get("all"):
+        return await check_all(concurrency=4)
+    name = body.get("name")
+    model = body.get("model")
     providers = load_providers()
     target = None
     if name:
@@ -147,12 +493,19 @@ async def api_probe(request: Request, _: None = Depends(_auth)) -> dict[str, Any
                 target = p
                 break
     elif providers:
-        target = next((p for p in providers if (p.get("api_key") or "").strip() and not str(p.get("api_key")).startswith("REPLACE_")), None)
+        target = next(
+            (
+                p
+                for p in providers
+                if (p.get("api_key") or "").strip() and not str(p.get("api_key")).startswith("REPLACE_")
+            ),
+            None,
+        )
     if not target:
         raise HTTPException(status_code=404, detail="provider not found or not configured")
     cfg = load_config()
     timeout = float(cfg.get("request_timeout_sec") or 120)
-    return await probe_provider(target, timeout_sec=min(60.0, timeout))
+    return await probe_provider(target, timeout_sec=min(60.0, timeout), model=model)
 
 
 @app.post("/admin/reload")
@@ -179,6 +532,38 @@ async def put_config(request: Request, _: None = Depends(_auth)) -> dict[str, An
         "request_timeout_sec",
         "max_retries_per_request",
         "health_probe_interval_sec",
+        "stream_stall_sec",
+        "tool_request_timeout_sec",
+        "tool_stream_stall_sec",
+        "fast_stream_stall_sec",
+        "fast_tool_stream_stall_sec",
+        "fast_tool_request_timeout_sec",
+        "fast_request_timeout_sec",
+        "fast_max_retries",
+        "complex_stream_stall_sec",
+        "complex_tool_stream_stall_sec",
+        "complex_request_timeout_sec",
+        "complex_tool_request_timeout_sec",
+        "complex_max_retries",
+        "novel_stream_stall_sec",
+        "novel_request_timeout_sec",
+        "code_stream_stall_sec",
+        "code_tool_stream_stall_sec",
+        "code_request_timeout_sec",
+        "code_tool_request_timeout_sec",
+        "code_max_retries",
+        "novel_max_retries",
+        "novel_fallback_daily",
+        "novel_preferred_provider",
+        "novel_stream_mode",
+        "encrypt_provider_keys",
+        "workbuddy_enable_agent_teams",
+        "fast_hedged_requests",
+        "fast_hedge_candidates",
+        "fast_hedge_with_tools",
+        "provider_max_concurrent",
+        "provider_concurrency_limit",
+        "usage_async_write",
     ):
         if key in body:
             cfg[key] = body[key]
@@ -206,13 +591,18 @@ async def put_providers(request: Request, _: None = Depends(_auth)) -> dict[str,
                 "base_url": item.get("base_url") or "",
                 "api_key": item.get("api_key") or "",
                 "models": item.get("models") or [],
+                "disabled_models": item.get("disabled_models") or [],
                 "free_only": bool(item.get("free_only", False)),
                 "weight": item.get("weight", 1),
                 "enabled": bool(item.get("enabled", True)),
             }
         )
     save_providers(cleaned)
-    return {"status": "saved", "count": len(cleaned)}
+    try:
+        rebuild_and_save()
+    except Exception:
+        pass
+    return {"status": "saved", "count": len(cleaned), "routes_rebuilt": True}
 
 
 @app.get("/api/routers")
@@ -229,14 +619,55 @@ async def put_routers(request: Request, _: None = Depends(_auth)) -> dict[str, A
     return {"status": "saved", "routes": list(body.keys())}
 
 
+@app.post("/api/routers/rebuild-smart")
+def post_rebuild_smart_routers(_: None = Depends(_auth)) -> dict[str, Any]:
+    """Rebuild all use-case routes from usage.jsonl success rates (top 10 each)."""
+    return rebuild_and_save()
+
+
 @app.get("/api/integrations/workbuddy")
 def get_workbuddy_integration(_: None = Depends(_auth)) -> dict[str, Any]:
     return workbuddy_status()
 
 
 @app.post("/api/integrations/workbuddy")
-def post_workbuddy_integration(_: None = Depends(_auth)) -> dict[str, Any]:
-    return sync_workbuddy()
+async def post_workbuddy_integration(
+    request: Request,
+    authorization: Optional[str] = Header(default=None),
+    x_api_key: Optional[str] = Header(default=None, alias="x-api-key"),
+    api_key: Optional[str] = Header(default=None, alias="api-key"),
+) -> dict[str, Any]:
+    host = request.client.host if request.client else ""
+    # Desktop UI runs on loopback — allow sync even when browser cached an old local key.
+    if host not in ("testclient", "testserver") and not is_loopback_host(host):
+        _auth(
+            authorization=authorization,
+            x_api_key=x_api_key,
+            api_key=api_key,
+        )
+    api_key_updated = False
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if isinstance(body, dict):
+        incoming_key = str(body.get("local_api_key") or "").strip()
+        if incoming_key:
+            cfg = load_config()
+            if cfg.get("local_api_key") != incoming_key:
+                cfg["local_api_key"] = incoming_key
+                save_config(cfg)
+                api_key_updated = True
+    try:
+        rebuild_and_save()
+    except Exception:
+        pass
+    out = sync_workbuddy()
+    synced_key = str(load_config().get("local_api_key") or "").strip()
+    out["api_key_updated"] = api_key_updated
+    out["api_key_masked"] = mask_secret(synced_key)
+    out["diagnose"] = diagnose_workbuddy()
+    return out
 
 
 def _models_payload() -> dict[str, Any]:
@@ -279,6 +710,8 @@ def models_alias(_: None = Depends(_auth)) -> dict[str, Any]:
 @app.post("/v1/chat/completions")
 @app.post("/chat/completions")
 async def chat_completions(request: Request, _: None = Depends(_auth)):
+    await ensure_not_maintenance()
+    await require_entitlement()
     cfg, providers, routers = reload_all()
     body = await request.json()
     if not isinstance(body, dict):
@@ -287,7 +720,51 @@ async def chat_completions(request: Request, _: None = Depends(_auth)):
     client_model = str(body.get("model") or "daily")
     stream = bool(body.get("stream"))
     timeout = float(cfg.get("request_timeout_sec") or 120)
-    max_retries = int(cfg.get("max_retries_per_request") or 4)
+    max_retries = int(cfg.get("max_retries_per_request") or 3)
+    has_tools = bool(body.get("tools"))
+    fast = is_fast_route(client_model)
+    complex_route = is_complex_route(client_model)
+    novel_route = is_novel_route(client_model)
+    coding_route = is_coding_route(client_model)
+
+    # Fast routes: low reasoning + short stall so WorkBuddy Agent feels snappy.
+    body = prepare_body_for_upstream(body, client_model)
+    if fast:
+        stall_sec = float(cfg.get("fast_stream_stall_sec") or cfg.get("stream_stall_sec") or 5)
+        timeout = min(timeout, float(cfg.get("fast_request_timeout_sec") or 20))
+        if has_tools:
+            stall_sec = float(cfg.get("fast_tool_stream_stall_sec") or 8)
+            timeout = min(
+                max(timeout, float(cfg.get("fast_tool_request_timeout_sec") or 60)),
+                float(cfg.get("fast_tool_request_timeout_sec") or 60),
+            )
+        max_retries = min(max_retries, int(cfg.get("fast_max_retries") or 3))
+    elif complex_route or novel_route:
+        # Smart / long-form: allow slow thinking; stall-fail over if hung.
+        stall_sec = float(cfg.get("complex_stream_stall_sec") or 30)
+        timeout = float(cfg.get("complex_request_timeout_sec") or 180)
+        if novel_route:
+            stall_sec = float(cfg.get("novel_stream_stall_sec") or stall_sec)
+            timeout = float(cfg.get("novel_request_timeout_sec") or timeout)
+        if has_tools:
+            stall_sec = max(stall_sec, float(cfg.get("complex_tool_stream_stall_sec") or 45))
+            timeout = max(timeout, float(cfg.get("complex_tool_request_timeout_sec") or 240))
+        max_retries = min(max(max_retries, int(cfg.get("complex_max_retries") or 6)), 8)
+    elif coding_route:
+        # Coding: prefer Coder models; tools need longer wait but still fail over.
+        stall_sec = float(cfg.get("code_stream_stall_sec") or 20)
+        timeout = float(cfg.get("code_request_timeout_sec") or 120)
+        if has_tools:
+            stall_sec = max(stall_sec, float(cfg.get("code_tool_stream_stall_sec") or 35))
+            timeout = max(timeout, float(cfg.get("code_tool_request_timeout_sec") or 180))
+        max_retries = min(max(max_retries, int(cfg.get("code_max_retries") or 4)), 5)
+    else:
+        stall_sec = float(cfg.get("stream_stall_sec") or 8)
+        # Cap per-attempt wait so a hung NVIDIA candidate fails over quickly.
+        timeout = min(timeout, float(cfg.get("request_timeout_sec") or 60), 60.0)
+        if has_tools:
+            stall_sec = max(stall_sec, float(cfg.get("tool_stream_stall_sec") or 20))
+            timeout = max(timeout, min(float(cfg.get("tool_request_timeout_sec") or 120), 120.0))
 
     candidates = resolve_candidates(client_model, providers, routers)
     if not candidates:
@@ -297,31 +774,90 @@ async def chat_completions(request: Request, _: None = Depends(_auth)):
         )
 
     errors: list[dict[str, Any]] = []
-    for provider, upstream_model in candidates[: max(1, max_retries)]:
-        resp, stream_iter, meta = await forward_chat(
-            provider=provider,
-            upstream_model=upstream_model,
-            client_model=client_model,
-            body=body,
-            timeout_sec=timeout,
-            stream=stream,
-        )
-        gateway_headers = {
-            "X-Gateway-Provider": str(meta.get("provider")),
-            "X-Gateway-Model": str(meta.get("upstream_model")),
-            "X-Request-Id": str(meta.get("request_id") or ""),
-        }
-        if stream:
-            if stream_iter is not None:
-                return StreamingResponse(
-                    stream_iter,
-                    media_type="text/event-stream",
-                    headers={
-                        **gateway_headers,
-                        "Cache-Control": "no-cache",
-                        "Connection": "keep-alive",
-                    },
+    tried: set[tuple[str, str]] = set()
+    import uuid as _uuid
+
+    client_request_id = (
+        (request.headers.get("x-request-id") or request.headers.get("x-client-request-id") or "")
+        .strip()[:48]
+        or _uuid.uuid4().hex[:16]
+    )
+
+    async def _attempt(provider: dict[str, Any], upstream_model: str) -> Any | None:
+        key = (str(provider.get("name") or ""), upstream_model)
+        if key in tried:
+            return None
+        tried.add(key)
+        plimit = provider_limit_from_config(cfg)
+
+        async def _do_attempt() -> Any | None:
+            resp, stream_iter, meta = await forward_chat(
+                provider=provider,
+                upstream_model=upstream_model,
+                client_model=client_model,
+                body=body,
+                timeout_sec=timeout,
+                stream=stream,
+                stall_sec=stall_sec,
+                client_request_id=client_request_id,
+            )
+            gateway_headers = {
+                "X-Gateway-Provider": _ascii_header(meta.get("provider")),
+                "X-Gateway-Model": _ascii_header(meta.get("upstream_model")),
+                "X-Request-Id": _ascii_header(meta.get("request_id") or ""),
+            }
+            if stream:
+                if stream_iter is not None:
+                    try:
+                        return StreamingResponse(
+                            stream_iter,
+                            media_type="text/event-stream",
+                            headers={
+                                **gateway_headers,
+                                "Cache-Control": "no-cache",
+                                "Connection": "keep-alive",
+                                "X-Accel-Buffering": "no",
+                            },
+                        )
+                    except UnicodeEncodeError:
+                        return StreamingResponse(
+                            stream_iter,
+                            media_type="text/event-stream",
+                            headers={
+                                "Cache-Control": "no-cache",
+                                "Connection": "keep-alive",
+                                "X-Accel-Buffering": "no",
+                                "X-Request-Id": _ascii_header(meta.get("request_id") or ""),
+                            },
+                        )
+                errors.append(
+                    {
+                        "provider": meta.get("provider"),
+                        "model": meta.get("upstream_model"),
+                        "error": meta.get("error"),
+                        "status_code": meta.get("status_code"),
+                    }
                 )
+                return None
+
+            if resp is not None and (meta.get("status_code") or resp.status_code) < 400:
+                raw = meta.get("_raw")
+                if isinstance(raw, dict) and not stream:
+                    if not _usable_chat_payload(raw):
+                        errors.append(
+                            {
+                                "provider": meta.get("provider"),
+                                "model": meta.get("upstream_model"),
+                                "error": "empty assistant content",
+                                "status_code": meta.get("status_code"),
+                            }
+                        )
+                        return None
+                    return JSONResponse(content=raw, headers=gateway_headers)
+                if isinstance(raw, dict):
+                    return JSONResponse(content=raw, headers=gateway_headers)
+                return JSONResponse(content={"raw": raw}, headers=gateway_headers)
+
             errors.append(
                 {
                     "provider": meta.get("provider"),
@@ -330,40 +866,253 @@ async def chat_completions(request: Request, _: None = Depends(_auth)):
                     "status_code": meta.get("status_code"),
                 }
             )
-            continue
+            return None
 
-        if resp is not None and (meta.get("status_code") or resp.status_code) < 400:
-            raw = meta.get("_raw")
-            if isinstance(raw, dict) and not stream:
-                # Empty/null choices or blank content → try next candidate (common for Qwen3 thinking).
-                if not _usable_chat_payload(raw):
-                    errors.append(
-                        {
-                            "provider": meta.get("provider"),
-                            "model": meta.get("upstream_model"),
-                            "error": "empty assistant content",
-                            "status_code": meta.get("status_code"),
-                        }
-                    )
-                    continue
-                return JSONResponse(content=raw, headers=gateway_headers)
-            if isinstance(raw, dict):
-                return JSONResponse(content=raw, headers=gateway_headers)
-            return JSONResponse(content={"raw": raw}, headers=gateway_headers)
+        pname = str(provider.get("name") or "unknown")
+        if plimit > 0:
+            async with provider_slot(pname, plimit):
+                return await _do_attempt()
+        return await _do_attempt()
 
-        errors.append(
-            {
-                "provider": meta.get("provider"),
-                "model": meta.get("upstream_model"),
-                "error": meta.get("error"),
-                "status_code": meta.get("status_code"),
-            }
-        )
+    try_n = max(1, min(len(candidates), max_retries))
+    if novel_route:
+        try_n = min(len(candidates), max(max_retries, int(cfg.get("novel_max_retries") or 6)))
+
+    use_hedge = (
+        fast
+        and bool(cfg.get("fast_hedged_requests", True))
+        and (not has_tools or bool(cfg.get("fast_hedge_with_tools", False)))
+        and len(candidates) >= 2
+    )
+    hedge_n = 0
+    if use_hedge:
+        hedge_n = min(int(cfg.get("fast_hedge_candidates") or 2), try_n, len(candidates))
+        hit = await race_first_success(candidates[:hedge_n], _attempt)
+        if hit is not None:
+            return hit
+
+    for provider, upstream_model in candidates[hedge_n:try_n]:
+        hit = await _attempt(provider, upstream_model)
+        if hit is not None:
+            return hit
+
+    # Novel last resort: borrow stable models from 日常 before 502.
+    if novel_route and bool(cfg.get("novel_fallback_daily", True)):
+        fallback = resolve_candidates("日常", providers, routers)
+        for provider, upstream_model in fallback[:4]:
+            hit = await _attempt(provider, upstream_model)
+            if hit is not None:
+                return hit
 
     raise HTTPException(
         status_code=502,
-        detail={"message": "All upstream candidates failed", "errors": errors},
+        detail={
+            "message": "所有上游候选均失败",
+            "code": "UPSTREAM_EXHAUSTED",
+            "errors": [enrich_error_entry(e) for e in errors],
+            "hint": remediation_hint(
+                classify_error(str((errors[-1] or {}).get("error") or "")) if errors else "unknown"
+            ),
+        },
     )
+
+
+# ----- account / shop / license proxy (run-jane) -----
+
+
+@app.get("/api/license/status")
+async def api_license_status(refresh: bool = False) -> dict[str, Any]:
+    if refresh and license_required():
+        await refresh_status(force=True)
+    return entitlement_snapshot()
+
+
+@app.get("/api/remote/bootstrap")
+async def api_remote_bootstrap() -> dict[str, Any]:
+    cfg = load_config()
+    local = {
+        "version": __version__,
+        "require_license": license_required(cfg),
+        "license_api_base": bool((cfg.get("license_api_base") or "").strip()),
+        "project_id": cfg.get("license_project_id"),
+    }
+    if not (cfg.get("license_api_base") or "").strip():
+        return {
+            **local,
+            "announcement": "未配置授权服务地址（license_api_base）。开发模式可关闭 require_license。",
+            "disclaimer": "本软件仅供个人学习与合法用途。",
+            "guideSteps": "1. 配置上游 Key\n2. 同步 WorkBuddy\n3. 重启 WorkBuddy",
+            "apiKeyGuide": "到上游平台注册并复制 API Key，粘贴到「上游渠道」。",
+            "latestVersion": __version__,
+            "downloadUrl": "",
+        }
+    try:
+        data = await jane_request("GET", "/gateway/meta/bootstrap", timeout=8.0)
+    except Exception:
+        # Don't block UI / desktop shell if remote is slow or down
+        return {
+            **local,
+            "announcement": "授权服务暂时不可达，可稍后点「检查更新」重试。",
+            "disclaimer": "本软件仅供个人学习与合法用途。",
+            "guideSteps": "",
+            "apiKeyGuide": "",
+            "latestVersion": __version__,
+            "downloadUrl": "",
+            "offline": True,
+        }
+    if not isinstance(data, dict):
+        data = {}
+    # normalize camelCase for UI
+    out = {
+        **local,
+        "announcement": data.get("announcement") or "",
+        "disclaimer": data.get("disclaimer") or "",
+        "guideSteps": data.get("guideSteps") or data.get("guide_steps") or "",
+        "apiKeyGuide": data.get("apiKeyGuide") or data.get("api_key_guide") or "",
+        "latestVersion": data.get("latestVersion") or data.get("latest_version") or __version__,
+        "downloadUrl": data.get("downloadUrl") or data.get("download_url") or "",
+        "downloadSha256": data.get("downloadSha256") or data.get("download_sha256") or "",
+        "projectId": data.get("projectId") or data.get("project_id") or cfg.get("license_project_id"),
+        "projectName": data.get("projectName") or data.get("project_name") or "大帅网关",
+        "maintenanceEnabled": bool(data.get("maintenanceEnabled") or data.get("maintenance_enabled")),
+        "maintenanceMessage": data.get("maintenanceMessage") or data.get("maintenance_message") or "",
+    }
+    if out.get("projectId") and not cfg.get("license_project_id"):
+        cfg2 = load_config()
+        cfg2["license_project_id"] = out["projectId"]
+        save_config(cfg2)
+    return out
+
+
+@app.post("/api/account/register")
+async def api_account_register(request: Request) -> dict[str, Any]:
+    body = await request.json()
+    payload = {
+        "username": (body or {}).get("username"),
+        "password": (body or {}).get("password"),
+        "confirmPassword": (body or {}).get("confirmPassword") or (body or {}).get("password"),
+        "typed": 0,
+    }
+    await jane_request("POST", "/user/register", json_body=payload)
+    return {"ok": True}
+
+
+@app.post("/api/account/login")
+async def api_account_login(request: Request) -> dict[str, Any]:
+    body = await request.json()
+    data = await jane_request(
+        "POST",
+        "/user/login",
+        json_body={
+            "username": (body or {}).get("username"),
+            "password": (body or {}).get("password"),
+            "typed": 0,
+        },
+    )
+    if not isinstance(data, dict) or not data.get("token"):
+        raise HTTPException(status_code=401, detail="登录失败")
+    sess = load_session()
+    sess["token"] = data.get("token")
+    sess["refresh_token"] = data.get("refreshToken") or data.get("refresh_token")
+    sess["user_id"] = data.get("userId") or data.get("user_id")
+    sess["username"] = data.get("username")
+    save_session(sess)
+    try:
+        status = await jane_request("GET", "/gateway/license/status", token=str(data.get("token")))
+        if isinstance(status, dict):
+            cache_entitlement(status)
+    except Exception:
+        pass
+    return {"ok": True, "license": entitlement_snapshot()}
+
+
+@app.post("/api/account/logout")
+async def api_account_logout() -> dict[str, Any]:
+    clear_session()
+    return {"ok": True}
+
+
+@app.get("/api/account/me")
+async def api_account_me() -> dict[str, Any]:
+    return entitlement_snapshot()
+
+
+@app.post("/api/license/redeem")
+async def api_license_redeem(request: Request) -> dict[str, Any]:
+    body = await request.json()
+    code = str((body or {}).get("cardCode") or (body or {}).get("card_code") or "").strip()
+    if not code:
+        raise HTTPException(status_code=400, detail="请输入卡密")
+    data = await jane_request("POST", "/gateway/license/redeem", json_body={"cardCode": code})
+    if isinstance(data, dict):
+        cache_entitlement(data)
+    return {"ok": True, "license": entitlement_snapshot()}
+
+
+@app.get("/api/shop/catalog")
+async def api_shop_catalog() -> dict[str, Any]:
+    cfg = load_config()
+    project_id = cfg.get("license_project_id")
+    if not project_id:
+        boot = await api_remote_bootstrap()
+        project_id = boot.get("projectId")
+    params: dict[str, Any] = {}
+    if project_id:
+        params["projectId"] = project_id
+    features = await jane_request("GET", "/cardSale/feature/list", params=params or None)
+    prices = await jane_request("GET", "/cardSale/price/list", params=params or None)
+    types = await jane_request("GET", "/cardSale/type/list")
+    return {
+        "projectId": project_id,
+        "features": features if isinstance(features, list) else [],
+        "prices": prices if isinstance(prices, list) else [],
+        "types": types if isinstance(types, list) else [],
+    }
+
+
+@app.post("/api/shop/order")
+async def api_shop_order(request: Request) -> dict[str, Any]:
+    body = await request.json()
+    sess = load_session()
+    if not sess.get("token"):
+        raise HTTPException(status_code=401, detail="请先登录")
+    email = str((body or {}).get("buyerEmail") or (body or {}).get("buyer_email") or "").strip()
+    if not email or "@" not in email or "." not in email.split("@")[-1]:
+        raise HTTPException(status_code=400, detail="请填写有效收货邮箱（用于接收卡密）")
+    payload = {
+        "priceId": (body or {}).get("priceId") or (body or {}).get("price_id"),
+        "channel": (body or {}).get("channel") or "WECHAT",
+        "buyerEmail": email,
+        "wechatScene": (body or {}).get("wechatScene") or "NATIVE",
+        "referrerSource": (body or {}).get("referrerSource") or "dashuai-gateway",
+    }
+    data = await jane_request("POST", "/cardSale/order/create", json_body=payload)
+    return data if isinstance(data, dict) else {"raw": data}
+
+
+@app.get("/api/shop/order/{order_no}")
+async def api_shop_order_get(order_no: str, verifyAmount: float | None = None) -> dict[str, Any]:
+    params = {}
+    if verifyAmount is not None:
+        params["verifyAmount"] = verifyAmount
+    data = await jane_request("GET", f"/cardSale/order/{order_no}", params=params or None)
+    return data if isinstance(data, dict) else {"raw": data}
+
+
+@app.post("/api/shop/order/{order_no}/redeem")
+async def api_shop_order_redeem(order_no: str) -> dict[str, Any]:
+    """After paid: redeem cardCode from order onto current user."""
+    data = await jane_request("GET", f"/cardSale/order/{order_no}")
+    if not isinstance(data, dict):
+        raise HTTPException(status_code=400, detail="查单失败")
+    status = str(data.get("status") or "").upper()
+    card = data.get("cardCode") or data.get("card_code")
+    if status != "PAID" or not card:
+        return {"ok": False, "paid": status == "PAID", "order": data, "message": "订单未支付或尚未发卡"}
+    redeemed = await jane_request("POST", "/gateway/license/redeem", json_body={"cardCode": card})
+    if isinstance(redeemed, dict):
+        cache_entitlement(redeemed)
+    return {"ok": True, "cardCode": card, "license": entitlement_snapshot()}
 
 
 _WEB_DIR = Path(__file__).resolve().parent.parent / "web"

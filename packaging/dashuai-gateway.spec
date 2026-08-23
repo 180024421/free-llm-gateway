@@ -12,7 +12,11 @@ datas = [
     (str(ROOT / "data" / "providers.example.json"), "data"),
     (str(ROOT / "data" / "routers.example.json"), "data"),
 ]
-for name in ("workbuddy.models.example.json", "workbuddy-models.example.json"):
+for name in (
+    "workbuddy.models.example.json",
+    "workbuddy-models.example.json",
+    "models_meta.json",
+):
     p = ROOT / "data" / name
     if p.exists():
         datas.append((str(p), "data"))
@@ -25,6 +29,9 @@ hiddenimports = [
     "gateway.proxy",
     "gateway.router",
     "gateway.state",
+    "gateway.meta",
+    "gateway.workbuddy",
+    "gateway.ops",
     "uvicorn.logging",
     "uvicorn.loops",
     "uvicorn.loops.auto",
@@ -99,4 +106,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon=str(ROOT / "packaging" / "assets" / "dashuai-gateway.ico")
+    if (ROOT / "packaging" / "assets" / "dashuai-gateway.ico").exists()
+    else None,
 )

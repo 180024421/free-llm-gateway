@@ -6,12 +6,12 @@ alwaysApply: false
 
 # AGENTS.md — 大帅网关
 
-品牌：**大帅网关 / Dashuai Gateway**。无 license / 无过期。
+品牌：**大帅网关 / Dashuai Gateway**。可选对接 run-jane 卡密授权（`require_license` + `license_api_base`）。
 
 ## 结构
 
-- `gateway/` — FastAPI 服务
-- `web/` — 控制台
+- `gateway/` — FastAPI 服务（含 `license.py` 门禁）
+- `web/` — 控制台（登录/购买/卡密/公告）
 - `packaging/` — Windows EXE / Inno 安装包
 - `clients/vscode/` — VS Code + Cursor 扩展
 - `clients/idea/` — IntelliJ 插件
@@ -23,3 +23,4 @@ alwaysApply: false
 - 默认 `127.0.0.1:8010`
 - 打包 EXE 时可用环境变量 `DASHUAI_DATA_DIR`
 - 勿提交真实 API Key
+- 开发可 `require_license: false`；正式需配置 `license_api_base` 指向 run-jane `/api`

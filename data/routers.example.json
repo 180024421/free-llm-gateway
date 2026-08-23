@@ -1,52 +1,206 @@
 {
-  "fast": {
-    "description": "偏快、适合日常对话",
+  "日常": {
+    "description": "综合日常：强模型优先，失败自动换下一个",
     "candidates": [
+      "deepseek-ai/DeepSeek-V4-Flash-0731",
+      "glm-5.2",
+      "sensenova-6.8-flash-lite",
+      "deepseek-v4-flash",
+      "Qwen/Qwen3.5-27B",
+      "glm-4.7",
+      "gemini-flash-latest",
+      "openrouter/free",
+      "openai/gpt-oss-120b",
       "meta/llama-3.1-8b-instruct",
-      "Qwen/Qwen3-8B",
-      "Qwen/Qwen3-4B"
-    ]
-  },
-  "daily": {
-    "description": "综合路由，尽量长上下文",
-    "candidates": [
-      "meta/llama-3.1-70b-instruct",
-      "Qwen/Qwen3-14B",
-      "meta/llama-3.1-8b-instruct",
+      "sensenova-6.7-flash-lite",
+      "glm-4.7-flash",
+      "Qwen/Qwen3-235B-A22B-Instruct-2507",
+      "deepseek-ai/DeepSeek-V4-Pro",
+      "nvidia/nemotron-3-super-120b-a12b",
       "Qwen/Qwen3-8B"
     ]
   },
-  "256k": {
-    "description": "兼容常见客户端习惯命名",
+  "快速": {
+    "description": "真·快速：小杯/Flash 优先",
     "candidates": [
-      "Qwen/Qwen3-14B",
-      "meta/llama-3.1-70b-instruct",
-      "meta/llama-3.1-8b-instruct"
+      "sensenova-6.8-flash-lite",
+      "sensenova-6.7-flash-lite",
+      "deepseek-ai/DeepSeek-V4-Flash-0731",
+      "glm-4.7-flash",
+      "gemini-3.1-flash-lite-preview",
+      "Qwen/Qwen3-8B",
+      "Qwen/Qwen3.5-4B",
+      "openrouter/free",
+      "glm-5.2",
+      "deepseek-v4-flash",
+      "glm-4.5-flash",
+      "Qwen/Qwen2.5-7B-Instruct",
+      "gemini-flash-latest",
+      "llama-3.1-8b-instant",
+      "llama3.1-8b",
+      "open-mistral-7b"
     ]
   },
-  "1m": {
-    "description": "优先大上下文模型",
+  "复杂": {
+    "description": "复杂任务：大杯优先",
     "candidates": [
-      "meta/llama-3.1-70b-instruct",
-      "Qwen/Qwen3-14B",
-      "mistralai/Mistral-Large-Instruct-2407",
+      "deepseek-ai/DeepSeek-V4-Pro",
+      "Qwen/Qwen3.5-397B-A17B",
+      "glm-5.2",
+      "nvidia/nemotron-3-super-120b-a12b",
+      "openai/gpt-oss-120b",
+      "Qwen/Qwen3-235B-A22B-Instruct-2507",
+      "glm-4.7",
+      "nvidia/llama-3.3-nemotron-super-49b-v1",
+      "Qwen/Qwen3.5-122B-A10B",
+      "gemini-pro-latest",
+      "gpt-oss-120b",
+      "meta/llama-3.3-70b-instruct"
+    ]
+  },
+  "小说": {
+    "description": "长文/创作",
+    "candidates": [
+      "deepseek-ai/DeepSeek-V4-Pro",
+      "Qwen/Qwen3.5-397B-A17B",
+      "glm-5.2",
+      "nvidia/nemotron-3-super-120b-a12b",
+      "openai/gpt-oss-120b",
+      "glm-4.7",
+      "Qwen/Qwen3-235B-A22B-Instruct-2507",
+      "glm-4.6",
+      "Qwen/Qwen3.5-122B-A10B",
+      "gemini-pro-latest",
+      "meta/llama-3.3-70b-instruct"
+    ]
+  },
+  "代码": {
+    "description": "写代码：Coder 优先",
+    "candidates": [
+      "Qwen/Qwen3-Coder-30B-A3B-Instruct",
+      "deepseek-ai/DeepSeek-V4-Pro",
+      "glm-5.2",
+      "openai/gpt-oss-120b",
+      "gpt-oss-120b",
+      "Qwen/Qwen3.5-27B",
+      "glm-4.7",
+      "nvidia/nemotron-3-super-120b-a12b",
+      "qwen/qwen3-32b",
+      "deepseek-ai/DeepSeek-V4-Flash-0731",
+      "mistral-small-latest"
+    ]
+  },
+  "识图": {
+    "description": "多模态识图",
+    "candidates": [
+      "Qwen/Qwen3-VL-8B-Instruct",
+      "Qwen/Qwen3-VL-235B-A22B-Instruct",
+      "meta/llama-3.2-11b-vision-instruct",
+      "nvidia/nemotron-nano-12b-v2-vl",
+      "gemini-flash-latest",
+      "gemini-3-flash-preview"
+    ]
+  },
+  "daily": {
+    "description": "日常（英，同日常）",
+    "candidates": [
+      "deepseek-ai/DeepSeek-V4-Flash-0731",
+      "glm-5.2",
+      "sensenova-6.8-flash-lite",
+      "deepseek-v4-flash",
+      "Qwen/Qwen3.5-27B",
+      "glm-4.7",
+      "gemini-flash-latest",
+      "openrouter/free",
+      "openai/gpt-oss-120b",
+      "meta/llama-3.1-8b-instruct",
+      "sensenova-6.7-flash-lite",
+      "glm-4.7-flash",
+      "Qwen/Qwen3-235B-A22B-Instruct-2507",
+      "deepseek-ai/DeepSeek-V4-Pro",
+      "nvidia/nemotron-3-super-120b-a12b",
+      "Qwen/Qwen3-8B"
+    ]
+  },
+  "fast": {
+    "description": "快速（英）",
+    "candidates": [
+      "sensenova-6.8-flash-lite",
+      "sensenova-6.7-flash-lite",
+      "deepseek-ai/DeepSeek-V4-Flash-0731",
+      "glm-4.7-flash",
+      "gemini-3.1-flash-lite-preview",
+      "Qwen/Qwen3-8B",
+      "Qwen/Qwen3.5-4B",
+      "openrouter/free",
+      "glm-5.2",
+      "deepseek-v4-flash",
+      "gemini-flash-latest",
+      "llama-3.1-8b-instant",
       "meta/llama-3.1-8b-instruct"
     ]
   },
   "vision": {
-    "description": "识图路由",
+    "description": "识图（英）",
     "candidates": [
       "Qwen/Qwen3-VL-8B-Instruct",
-      "Qwen/Qwen3-14B",
-      "meta/llama-3.1-8b-instruct"
+      "Qwen/Qwen3-VL-235B-A22B-Instruct",
+      "meta/llama-3.2-11b-vision-instruct",
+      "nvidia/nemotron-nano-12b-v2-vl",
+      "gemini-flash-latest"
+    ]
+  },
+  "complex": {
+    "description": "复杂（英）",
+    "candidates": [
+      "deepseek-ai/DeepSeek-V4-Pro",
+      "Qwen/Qwen3.5-397B-A17B",
+      "glm-5.2",
+      "nvidia/nemotron-3-super-120b-a12b",
+      "openai/gpt-oss-120b",
+      "glm-4.7",
+      "gemini-pro-latest"
+    ]
+  },
+  "novel": {
+    "description": "小说（英）",
+    "candidates": [
+      "deepseek-ai/DeepSeek-V4-Pro",
+      "Qwen/Qwen3.5-397B-A17B",
+      "glm-5.2",
+      "nvidia/nemotron-3-super-120b-a12b",
+      "openai/gpt-oss-120b",
+      "glm-4.7"
     ]
   },
   "code": {
-    "description": "编程辅助",
+    "description": "代码（英）",
     "candidates": [
-      "Qwen/Qwen3-14B",
-      "meta/llama-3.1-70b-instruct",
-      "meta/llama-3.1-8b-instruct"
+      "Qwen/Qwen3-Coder-30B-A3B-Instruct",
+      "deepseek-ai/DeepSeek-V4-Pro",
+      "glm-5.2",
+      "openai/gpt-oss-120b",
+      "glm-4.7"
+    ]
+  },
+  "auto": {
+    "description": "同日常：强→弱自动切换",
+    "candidates": [
+      "deepseek-ai/DeepSeek-V4-Flash-0731",
+      "glm-5.2",
+      "sensenova-6.8-flash-lite",
+      "deepseek-v4-flash",
+      "Qwen/Qwen3.5-27B",
+      "glm-4.7",
+      "gemini-flash-latest",
+      "openrouter/free",
+      "openai/gpt-oss-120b",
+      "meta/llama-3.1-8b-instruct",
+      "sensenova-6.7-flash-lite",
+      "glm-4.7-flash",
+      "deepseek-ai/DeepSeek-V4-Pro",
+      "nvidia/nemotron-3-super-120b-a12b",
+      "Qwen/Qwen3-8B"
     ]
   }
 }
