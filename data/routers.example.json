@@ -93,12 +93,16 @@
   "识图": {
     "description": "多模态识图",
     "candidates": [
-      "Qwen/Qwen3-VL-8B-Instruct",
-      "Qwen/Qwen3-VL-235B-A22B-Instruct",
-      "meta/llama-3.2-11b-vision-instruct",
       "nvidia/nemotron-nano-12b-v2-vl",
+      "meta/llama-3.2-11b-vision-instruct",
+      "Qwen/Qwen3-VL-235B-A22B-Instruct",
+      "Qwen/Qwen3-VL-8B-Instruct",
       "gemini-flash-latest",
-      "gemini-3-flash-preview"
+      "gemini-3-flash-preview",
+      "gemma-4-31b",
+      "google/gemma-4-31b-it:free",
+      "gemini-3.1-flash-lite-preview",
+      "gemini-2.5-flash"
     ]
   },
   "daily": {

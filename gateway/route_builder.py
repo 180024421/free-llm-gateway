@@ -35,6 +35,20 @@ _NOVEL_PIN = (
     "hunyuan-lite",
 )
 
+# 识图：强度优先（同档再靠稳定性）。重建时会把「当前可用」整段提到前面。
+_VISION_STRENGTH_PIN = (
+    "Qwen/Qwen3-VL-235B-A22B-Instruct",
+    "Qwen/Qwen3-VL-8B-Instruct",
+    "nvidia/nemotron-nano-12b-v2-vl",
+    "gemini-flash-latest",
+    "gemini-3-flash-preview",
+    "gemma-4-31b",
+    "google/gemma-4-31b-it:free",
+    "meta/llama-3.2-11b-vision-instruct",
+    "gemini-3.1-flash-lite-preview",
+    "gemini-2.5-flash",
+)
+
 ROUTE_ALIASES: dict[str, set[str]] = {
     "日常": {"日常", "daily", "auto", "1m"},
     "快速": {"快速", "fast", "256k"},
@@ -225,19 +239,74 @@ PROFILES: list[RouteProfile] = [
     RouteProfile(
         "Agent",
         "agent",
-        "Agent 工具：Coder + 稳定中杯，准确度优先",
-        _compile(r"coder", r"gpt-oss", r"nemotron", r"30b", r"flash", r"glm-4"),
+        "Agent 工具：优先工具调用强的文本模型（排除 VL）",
+        _compile(
+            r"minimax",
+            r"deepseek-v4",
+            r"coder",
+            r"gpt-oss",
+            r"nemotron-3-super",
+            r"nemotron-super",
+            r"30b",
+            r"glm-4\.7",
+            r"sensenova.*flash",
+        ),
         ROUTE_ALIASES["Agent"],
-        reliability_w=0.35,
-        accuracy_w=0.50,
+        reliability_w=0.40,
+        accuracy_w=0.45,
         speed_w=0.15,
         min_accuracy=0.55,
     ),
 ]
 
 
+# Agent / 画布工具：强度优先；绝不混入 VL（识图模型不会好好调 Ardot）。
+_AGENT_STRENGTH_PIN = (
+    "minimaxai/minimax-m3",
+    "deepseek-v4-flash",
+    "deepseek-ai/DeepSeek-V4-Flash-0731",
+    "nvidia/nemotron-3-super-120b-a12b",
+    "Qwen/Qwen3-Coder-30B-A3B-Instruct",
+    "openai/gpt-oss-120b",
+    "nvidia/llama-3.3-nemotron-super-49b-v1",
+    "sensenova-6.8-flash-lite",
+)
+
+def _is_vision_model(model: str) -> bool:
+    return bool(re.search(r"(?:^|/)(?:.*-)?vl(?:-|$)|vision|internvl|phi-3-vision", model or "", re.I))
+
+
+def _apply_agent_preference(pool: list[str]) -> list[str]:
+    """Agent/Ardot：排除 VL；可用工具强模型按 PIN 置顶。"""
+    text_only = [m for m in pool if not _is_vision_model(m)]
+    if not text_only:
+        text_only = list(pool)
+    pin_rank = {m.lower(): i for i, m in enumerate(_AGENT_STRENGTH_PIN)}
+
+    def key(m: str) -> tuple[int, str]:
+        return (pin_rank.get(m.lower(), 10_000), m.lower())
+
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for pref in _AGENT_STRENGTH_PIN:
+        hit = next((m for m in text_only if m.lower() == pref.lower() and m not in seen), None)
+        if hit:
+            ordered.append(hit)
+            seen.add(hit)
+    for m in sorted(text_only, key=key):
+        if m not in seen:
+            ordered.append(m)
+            seen.add(m)
+    return ordered
+
+
 def model_accuracy_tier(model: str) -> float:
     m = model or ""
+    # Dedicated VL / multimodal: prefer real vision models over tiny text LLMs.
+    if re.search(r"qwen3-vl-235b|internvl|gpt-4o(?!-mini)", m, re.I):
+        return 0.96
+    if re.search(r"qwen3-vl|nemotron-.*-vl|llama-3\.2-.*vision|phi-3-vision|gemini-.*flash", m, re.I):
+        return 0.88
     if _ACCURACY_ULTRA.search(m):
         return 0.95
     if _ACCURACY_HIGH.search(m):
@@ -247,6 +316,65 @@ def model_accuracy_tier(model: str) -> float:
     if _ACCURACY_LOW.search(m):
         return 0.35
     return 0.55
+
+
+def _vision_model_usable(model: str, providers: list[dict[str, Any]]) -> bool:
+    """True if at least one enabled provider path is not in circuit cooldown."""
+    from .state import STATE
+
+    now = time.time()
+    saw = False
+    for p in providers:
+        if not p.get("enabled", True):
+            continue
+        key = (p.get("api_key") or "").strip()
+        if not key or key.startswith("REPLACE_"):
+            continue
+        models = [str(x) for x in (p.get("models") or [])]
+        disabled = {str(x) for x in (p.get("disabled_models") or [])}
+        canon = next((m for m in models if m.lower() == model.lower() and m not in disabled), None)
+        if not canon:
+            continue
+        saw = True
+        h = STATE.get(p.get("name") or "?", canon)
+        if now < float(getattr(h, "open_until", 0.0) or 0.0):
+            continue
+        total = int(h.successes) + int(h.failures)
+        if total >= 8 and int(h.successes) / total < 0.15:
+            continue
+        if int(h.consecutive_failures) >= 8 and int(h.successes) == 0:
+            continue
+        return True
+    return False if saw else True
+
+
+def _apply_vision_preference(pool: list[str], providers: list[dict[str, Any]]) -> list[str]:
+    """可用的在前；同档按强度 PIN；不可用的强模型留作恢复后的后备。"""
+    if not pool:
+        return []
+    pin_rank = {m.lower(): i for i, m in enumerate(_VISION_STRENGTH_PIN)}
+
+    def strength_key(m: str) -> tuple[int, str]:
+        return (pin_rank.get(m.lower(), 10_000), m.lower())
+
+    healthy = [m for m in pool if _vision_model_usable(m, providers)]
+    sick = [m for m in pool if m not in set(healthy)]
+    healthy.sort(key=strength_key)
+    sick.sort(key=strength_key)
+
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for group in (healthy, sick):
+        for pref in _VISION_STRENGTH_PIN:
+            hit = next((m for m in group if m.lower() == pref.lower() and m not in seen), None)
+            if hit:
+                ordered.append(hit)
+                seen.add(hit)
+        for m in group:
+            if m not in seen:
+                ordered.append(m)
+                seen.add(m)
+    return ordered
 
 
 def model_speed_tier(model: str, median_latency_ms: float | None) -> float:
@@ -537,7 +665,17 @@ def build_smart_routers(
             ]
             pool = _novel_pool_filter(pin + extra, global_stats, route_stats)
             pool = _apply_novel_preference(pool, providers, pref)
-        cands = pick_candidates(pool, profile, global_stats, route_stats, top_n=top_n)
+        if profile.cn == "识图":
+            # 先按「当前可用 + 强度」排池，再打分；最后再钉一次顺序，避免弱但稳的挤掉强 VL。
+            pool = _apply_vision_preference(pool, providers)
+        if profile.cn == "Agent":
+            # 工具/Ardot 任务：严格按 PIN，不要被 VL/用量分打乱。
+            pool = _apply_agent_preference(pool)
+            cands = pool[:top_n]
+        else:
+            cands = pick_candidates(pool, profile, global_stats, route_stats, top_n=top_n)
+        if profile.cn == "识图":
+            cands = _apply_vision_preference(cands, providers)[:top_n]
         if profile.cn == "小说":
             # Novel: fewer hops, only proven models (max 6).
             cands = cands[: min(6, top_n)]
@@ -572,6 +710,13 @@ def rebuild_and_save(
     *,
     top_n: int = TOP_N,
 ) -> dict[str, Any]:
+    try:
+        from .channel_store import apply_to_state
+        from .state import STATE
+
+        apply_to_state(STATE)
+    except Exception:
+        pass
     routers = build_smart_routers(providers, top_n=top_n)
     save_routers(routers)
     summary = []

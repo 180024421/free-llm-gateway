@@ -34,8 +34,22 @@ def _log(msg: str) -> None:
         pass
 
 
+def _hide_console() -> None:
+    """Hide the console flash: we build with console=True (runw bootloader is broken here)."""
+    if not getattr(sys, "frozen", False) or sys.platform != "win32":
+        return
+    try:
+        import ctypes
+
+        hwnd = ctypes.windll.kernel32.GetConsoleWindow()
+        if hwnd:
+            ctypes.windll.user32.ShowWindow(hwnd, 0)  # SW_HIDE
+    except Exception:
+        pass
+
+
 def _silence_stdio() -> None:
-    """Windowed EXE has no console; avoid print/logging crashes on missing stdout."""
+    """Avoid print/logging crashes if stdio is missing or redirected."""
     if not getattr(sys, "frozen", False):
         return
     try:
@@ -351,6 +365,7 @@ def _token_low_watcher(port: int) -> None:
 
 
 def main() -> None:
+    _hide_console()
     _silence_stdio()
     root = _bundle_root()
     _prepare_env(root)

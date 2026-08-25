@@ -10,6 +10,19 @@ from gateway.proxy import (
 from gateway.router import resolve_candidates
 
 
+def test_remount_vision_with_ardot_tools_to_agent():
+    from gateway.proxy import remount_route_for_tools
+
+    body = {
+        "model": "识图",
+        "tools": [{"type": "function", "function": {"name": "mcp__ardot__batch_edit"}}],
+    }
+    assert remount_route_for_tools("识图", body) == "Agent"
+    assert remount_route_for_tools("vision", body) == "Agent"
+    assert remount_route_for_tools("日常", {"tools": [{"function": {"name": "shell"}}]}) == "日常"
+    assert remount_route_for_tools("识图", {"messages": []}) == "识图"
+
+
 def test_rewrite_model_field():
     raw = {"id": "x", "model": "upstream-model", "choices": []}
     out = rewrite_model_field(raw, "daily")
@@ -50,6 +63,34 @@ def test_sse_looks_complete():
     part2 = b'ices":[]}\n\n'
     out = rw.feed(part1) + rw.feed(part2) + rw.flush()
     assert b'"model": "daily"' in out or b'"model":"daily"' in out
+
+
+def test_sse_utf8_split_mid_chinese_does_not_corrupt():
+    """Regression: TCP may split a UTF-8 char; old rewriter leaked bytes as mojibake."""
+    import json as _json
+
+    payload = {
+        "model": "upstream-vl",
+        "choices": [{"delta": {"content": "一只橘猫蹲在窗台"}, "finish_reason": None}],
+    }
+    full = ("data: " + _json.dumps(payload, ensure_ascii=False) + "\n\n").encode("utf-8")
+    # Force a split inside a multi-byte Chinese character.
+    cut = None
+    for i in range(1, len(full) - 1):
+        try:
+            full[:i].decode("utf-8")
+        except UnicodeDecodeError:
+            cut = i
+            break
+    assert cut is not None, "expected a mid-character split point"
+    rw = SseModelRewriter("识图")
+    out = rw.feed(full[:cut]) + rw.feed(full[cut:]) + rw.flush()
+    text = out.decode("utf-8")
+    assert "data: " in text
+    assert "橘猫" in text or "\\u6a58\\u732b" in text or "\\u6a58" in text
+    # Must not glue a raw second event into content.
+    assert text.count("data: ") == 1
+    assert '"model": "\\u8bc6\\u56fe"' in text or '"model":"\\u8bc6\\u56fe"' in text or '"model": "识图"' in text or '"model":"识图"' in text
 
 
 def test_resolve_candidates_prefers_ready_provider():

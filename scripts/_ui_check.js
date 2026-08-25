@@ -108,8 +108,11 @@ function upsertProvider(list, presetName, apiKey, baseUrl) {
 }
 
 function parseSetupPaste() {
-  const raw = ($("#setupPaste") && $("#setupPaste").value || "").trim();
-  if (!raw) { toast("粘贴区是空的", true); return; }
+  const raw = ($("#homePaste") && $("#homePaste").value || "").trim()
+    || ($("#setupPaste") && $("#setupPaste").value || "").trim();
+  if (!raw) { toast("请先粘贴 Key", true); return; }
+  if ($("#setupPaste")) $("#setupPaste").value = raw;
+  if ($("#homePaste") && !$("#homePaste").value.trim()) $("#homePaste").value = raw;
   const tokens = raw.split(/[\s,;|]+/).map(s => s.trim()).filter(s => s.length >= 8);
   let nvidia = "", ms = "", oai = "";
   for (const t of tokens) {
@@ -127,10 +130,14 @@ function parseSetupPaste() {
   if (oai) $("#setupOai").value = oai;
   const n = [nvidia, ms, oai].filter(Boolean).length;
   if ($("#setupResult")) $("#setupResult").textContent = n ? ("已识别 " + n + " 个 Key") : "未识别到 Key";
+  if ($("#homeSetupResult")) $("#homeSetupResult").textContent = n ? ("已识别 " + n + " 个 Key") : "未识别到 Key";
   toast(n ? ("已识别 " + n + " 个 Key") : "未识别到 Key", !n);
 }
 
-async function importSetupKeys() {
+async function importSetupKeys(opts) {
+  const hasPaste = ($("#homePaste") && $("#homePaste").value || "").trim()
+    || ($("#setupPaste") && $("#setupPaste").value || "").trim();
+  if (hasPaste) parseSetupPaste();
   const nvidia = ($("#setupNvidia") && $("#setupNvidia").value || "").trim();
   const ms = ($("#setupMs") && $("#setupMs").value || "").trim();
   const oai = ($("#setupOai") && $("#setupOai").value || "").trim();
@@ -140,6 +147,7 @@ async function importSetupKeys() {
     return;
   }
   if ($("#setupResult")) $("#setupResult").textContent = "导入中…";
+  if ($("#homeSetupResult")) $("#homeSetupResult").textContent = "导入中…";
   if ($("#btnImportKeys")) $("#btnImportKeys").disabled = true;
   try {
     const pr = await fetch("/api/providers", { headers: authHeaders() });
@@ -152,6 +160,7 @@ async function importSetupKeys() {
     state.providers = list;
     await saveProviders(false);
     if ($("#setupResult")) $("#setupResult").textContent = "已导入 " + n + " 项";
+    if ($("#homeSetupResult")) $("#homeSetupResult").textContent = "已导入 " + n + " 项";
     toast("一键导入成功（" + n + " 项）");
     for (const p of state.providers) {
       if (p.enabled && keyReady(p.api_key)) {
@@ -165,9 +174,11 @@ async function importSetupKeys() {
       }
     }
     await refresh();
-    go("connect");
+    if (opts && opts.syncWb) await syncWorkBuddy();
+    if (!(opts && opts.stay)) go("connect");
   } catch (e) {
     if ($("#setupResult")) $("#setupResult").textContent = "导入失败";
+    if ($("#homeSetupResult")) $("#homeSetupResult").textContent = "导入失败";
     toast("导入失败：请确认本地 API Key 正确", true);
   } finally {
     if ($("#btnImportKeys")) $("#btnImportKeys").disabled = false;
@@ -277,13 +288,20 @@ async function syncWorkBuddy(opts){
     const ready = (j.providers_ready || []).length;
     const names = (j.models || []).map(m => m.id).join("、");
     const wbPath = (j.diagnose && j.diagnose.path) || (j.path || "~/.workbuddy/models.json");
-    const keyLine = j.api_key_masked ? ("\n本地 Key 已写入 WorkBuddy：" + j.api_key_masked) : "";
+    const keyLine = j.api_key_masked ? ("\n本地 Key 已写入客户端：" + j.api_key_masked) : "";
+    localStorage.setItem("dashuai_key_prompted", "1");
+    if ($("#keyModal")) $("#keyModal").classList.remove("show");
+    const ides = (j.ides && j.ides.targets) || [];
+    const ideOk = ides.filter(t => t && t.ok).map(t => t.product).join("、");
+    const ideLine = ideOk ? ("\n同时已写入：" + ideOk) : "";
     if (!silent) {
       if (!ready) {
-        toast("已写入 WorkBuddy（" + (j.count || 0) + " 个用途），但还没有可用上游 Key。路径：" + wbPath + keyLine, true);
+        toast("已写入客户端配置（" + (j.count || 0) + " 个用途），但还没有可用上游 Key。路径：" + wbPath + keyLine, true);
       } else {
-        toast("已写入 " + (j.count || 0) + " 个用途到 WorkBuddy。" + keyLine + "\n路径：" + wbPath + "\n请完全退出并重启 WorkBuddy（任务栏右键退出，不是只关窗口）。\n模型：" + names);
-        showWbWizard(wbPath);
+        const reload = j.hot_reload
+          ? "WorkBuddy 正在运行，列表通常会自动刷新，不用改设置。"
+          : "下次打开 WorkBuddy 即可直接选模型，不用填 URL / Key。";
+        toast("已同步 " + (j.count || 0) + " 个用途。" + keyLine + ideLine + "\n" + reload + "\n模型：" + names);
       }
     }
     return { ok: true, ready, count: j.count || 0, path: wbPath, raw: j };
@@ -318,6 +336,9 @@ function go(page){
   if (page === "usage") {
     loadUsage();
     loadCallLog();
+  }
+  if (page === "home") {
+    loadHomeUsageMini();
   }
   // dirty 时 refresh 也会跳过 providers，这里照常刷监控即可
   if (page === "monitor") refresh();
@@ -402,6 +423,7 @@ function renderHome(j){
   $("#statCalls").textContent = String(ustat.client_requests ?? ustat.requests ?? usage.total ?? 0);
   $("#statCallsHint").textContent = `上游 ${ustat.requests ?? usage.total ?? 0} 次 · 成功 ${ustat.ok ?? usage.ok ?? 0}`;
   $("#navVer").textContent = `v${j.version || "—"}`;
+  if (window.__dashuaiSetAboutVersion) window.__dashuaiSetAboutVersion(j.version || "");
 
   const fails = j.recent_failures || [];
   const banner = $("#homeFailBanner");
@@ -460,18 +482,29 @@ function renderHome(j){
   $("#wbSnippet").value = wbSnippet(base, state.localKey);
 
   const steps = [
-    { done: ready.length > 0, title: "粘贴至少一个上游 API Key 并保存", tip: "上游渠道粘贴 Key（自动启用）→ 保存并同步 WorkBuddy", action: "去配置", page: "providers" },
-    { done: !!j.config?.local_api_key_set, title: "确认本地网关 Key", tip: "客户端 API Key 必须与这里一致", action: "去接入", page: "connect" },
-    { done: Object.keys(routes).length > 0, title: "选用路由模型名", tip: "WorkBuddy 选「日常 / 快速 / 识图 · 大帅网关」", action: "看路由", page: "routes" },
-    { done: (usage.total ?? 0) > 0, title: "发一次测试请求", tip: "复制 curl，或用客户端随便问一句", action: "去接入", page: "connect" },
+    { done: ready.length > 0, title: "粘贴至少一个上游 API Key", tip: "工作台上方粘贴框 → 导入并启用", action: "去粘贴", page: "home" },
+    { done: !!j.config?.local_api_key_set, title: "确认本地网关 Key", tip: "右侧复制本地 Key 到客户端", action: "复制", page: "home" },
+    { done: Object.keys(routes).length > 0, title: "同步到本机客户端", tip: "点「同步到本机客户端」，不用去 WorkBuddy / Cursor 里改设置", action: "同步", page: "home", sync: true },
+    { done: (usage.total ?? 0) > 0, title: "发一次测试请求", tip: "客户端模型列表选「日常 · 大帅网关」随便问一句", action: "看用量", page: "home" },
   ];
+  const doneCount = steps.filter(s => s.done).length;
+  $$("#wizardBar .wstep").forEach(el => {
+    const w = Number(el.dataset.w || 0);
+    el.classList.remove("done", "cur");
+    if (w <= doneCount) el.classList.add("done");
+    else if (w === doneCount + 1) el.classList.add("cur");
+  });
   $("#homeSteps").innerHTML = steps.map((s,i)=>`
     <div class="step ${s.done ? "done" : ""}">
       <div class="n">${s.done ? "✓" : (i+1)}</div>
       <div><div class="t">${s.title}</div><div class="s">${s.tip}</div></div>
-      <button class="btn btn-secondary btn-sm" type="button" data-go="${s.page}">${s.action}</button>
+      <button class="btn btn-secondary btn-sm" type="button" data-go="${s.page}" ${s.sync ? "data-sync-wb=1" : ""}>${s.action}</button>
     </div>`).join("");
-  $$("#homeSteps [data-go]").forEach(b => b.onclick = () => go(b.dataset.go));
+  $$("#homeSteps [data-go]").forEach(b => b.onclick = () => {
+    if (b.dataset.syncWb) { syncWorkBuddy(); return; }
+    go(b.dataset.go);
+  });
+  loadHomeUsageMini();
 }
 
 function fmtNum(n){
@@ -540,11 +573,54 @@ async function loadUsage(){
   try{
     const r = await fetch(`/api/usage?days=${state.usageDays}`);
     if (!r.ok) throw new Error("usage " + r.status);
-    renderUsage(await r.json());
+    const data = await r.json();
+    renderUsage(data);
+    if (state.usageDays === 1) renderHomeUsageMini(data);
   }catch(e){
     const body = $("#usageBody");
     if (body) body.innerHTML = `<tr><td colspan="5" style="color:var(--muted)">用量加载失败</td></tr>`;
   }
+}
+
+function renderHomeUsageMini(data){
+  if (!data) return;
+  const t = data.total || {};
+  const cards = [
+    { label: "输入 Token", value: t.pt },
+    { label: "输出 Token", value: t.ct },
+    { label: "合计 Token", value: t.tt },
+    { label: "请求数", value: t.requests },
+  ];
+  const el = $("#homeUsageOverview");
+  if (el) el.innerHTML = cards.map(c =>
+    `<div class="stat-card"><div class="k">${c.label}</div><div class="v">${fmtNum(c.value)}</div></div>`
+  ).join("");
+}
+
+async function loadHomeUsageMini(){
+  try{
+    const r = await fetch("/api/usage?days=1");
+    if (!r.ok) return;
+    renderHomeUsageMini(await r.json());
+    const cr = await fetch("/api/call-log");
+    if (!cr.ok) return;
+    const data = await cr.json();
+    const tbody = $("#homeCallLogBody");
+    if (!tbody) return;
+    if (!data || !data.length){
+      tbody.innerHTML = `<tr><td colspan="4" style="color:var(--muted)">暂无调用</td></tr>`;
+      return;
+    }
+    tbody.innerHTML = data.slice(-8).reverse().map(d => {
+      const ok = d.status === "ok";
+      return `<tr>
+        <td style="color:var(--muted);font-size:11px">${esc((d.time||"").slice(11,19) || d.time || "")}</td>
+        <td>${ok ? '<span class="chip ok">OK</span>' : '<span class="chip bad">失败</span>'}</td>
+        <td>${esc(d.model || "-")}</td>
+        <td style="font-variant-numeric:tabular-nums;color:var(--muted)">${d.tokens ? fmtNum(d.tokens) : "—"}</td>
+      </tr>`;
+    }).join("");
+  }catch(_){}
 }
 
 function renderUsage(data){
@@ -829,8 +905,18 @@ async function probeOne(idx){
 }
 
 async function refresh(){
+  if (document.hidden) return;
+  const live = $("#liveText");
+  if (live && !state._refreshing) {
+    const prev = live.textContent;
+    if (prev && prev.indexOf("无法") < 0) live.textContent = "同步中…";
+  }
+  state._refreshing = true;
   try{
-    const r = await fetch("/api/overview");
+    const tasks = [fetch("/api/overview")];
+    if (!state.dirtyProviders) tasks.push(fetch("/api/providers", { headers: authHeaders() }));
+    const results = await Promise.all(tasks);
+    const r = results[0];
     if (!r.ok) throw new Error("overview");
     const j = await r.json();
     state.overview = j;
@@ -839,23 +925,87 @@ async function refresh(){
     renderHome(j);
     renderMonitor(j);
     renderRoutes();
-  }catch(e){
-    $("#liveDot").classList.remove("on");
-    $("#liveText").textContent = "无法连接网关";
-    toast("网关未响应", true);
-  }
-  // 有未保存修改时绝不覆盖本地编辑（否则 15 秒轮询会冲掉新增渠道）
-  if (state.dirtyProviders) return;
-  try{
-    const r = await fetch("/api/providers", { headers: authHeaders() });
-    if (r.ok){
-      state.providers = (await r.json() || []).map(normalizeProvider);
+    if (!state.dirtyProviders && results[1] && results[1].ok){
+      state.providers = (await results[1].json() || []).map(normalizeProvider);
+      if (!sessionStorage.getItem("dashuai_presets_ensured")) {
+        sessionStorage.setItem("dashuai_presets_ensured", "1");
+        try { await ensureAllPresetsPresent({ silent: true }); } catch (_) {}
+      }
       renderProviders();
     }
-  }catch(_){}
+    }catch(e){
+    $("#liveDot").classList.remove("on");
+    $("#liveText").textContent = "无法连接网关";
+    const home = $("#page-home");
+    if (home && !home.querySelector("[data-retry-refresh]")) {
+      const box = document.createElement("div");
+      box.className = "empty";
+      box.style.margin = "12px 0";
+      box.innerHTML = `网关未响应。<button class="btn btn-secondary btn-sm" type="button" data-retry-refresh>重试</button>`;
+      home.prepend(box);
+      box.querySelector("[data-retry-refresh]").onclick = () => { box.remove(); refresh(); };
+    }
+    toast("网关未响应", true);
+  }finally{
+    state._refreshing = false;
+  }
 }
 
 $$(".nav button[data-page]").forEach(b => b.onclick = () => go(b.dataset.page));
+
+(function initAboutPage(){
+  const DEFAULT_DISCLAIMER = "本软件免费提供个人学习与合法用途使用，但并非开源软件。禁止反编译、破解、二次分发源码、出售、捆绑或任何商业用途。使用本软件即表示你已阅读并同意上述条款；作者不对使用后果承担责任。";
+  let tipTimer = null;
+  function flashAbout(msg){
+    const tip = $("#aboutTip");
+    if (!tip) return;
+    tip.textContent = msg;
+    tip.classList.add("show");
+    if (tipTimer) clearTimeout(tipTimer);
+    tipTimer = setTimeout(() => { tip.classList.remove("show"); tip.textContent = ""; }, 1800);
+  }
+  function setAboutPanel(name){
+    const key = (name === "sponsor" || name === "contact") ? name : "about";
+    $$("#aboutTabs [data-about]").forEach(b => b.classList.toggle("on", b.dataset.about === key));
+    $$(".about-panel").forEach(p => p.classList.toggle("on", p.id === `aboutPanel-${key}`));
+  }
+  $$("#aboutTabs [data-about]").forEach(b => b.onclick = () => setAboutPanel(b.dataset.about));
+  document.body.addEventListener("click", (e) => {
+    const goBtn = e.target.closest("[data-about-go]");
+    if (goBtn){
+      go("about");
+      setAboutPanel(goBtn.dataset.aboutGo);
+      return;
+    }
+    const copyBtn = e.target.closest("[data-copy-text]");
+    if (copyBtn){
+      const label = copyBtn.dataset.copyLabel || "";
+      void copyText(copyBtn.dataset.copyText || "").then(() => flashAbout(`已复制${label}`));
+      return;
+    }
+    const qrBtn = e.target.closest("[data-qr-preview]");
+    if (qrBtn){
+      const ov = $("#aboutQrOverlay");
+      const img = $("#aboutQrLarge");
+      if (ov && img){
+        img.src = qrBtn.dataset.qrPreview;
+        ov.classList.add("show");
+      }
+      return;
+    }
+  });
+  const closeOv = () => { const ov = $("#aboutQrOverlay"); if (ov) ov.classList.remove("show"); };
+  $("#aboutQrClose")?.addEventListener("click", closeOv);
+  $("#aboutQrOverlay")?.addEventListener("click", (e) => { if (e.target.id === "aboutQrOverlay") closeOv(); });
+  window.addEventListener("keydown", (e) => { if (e.key === "Escape") closeOv(); });
+  // expose for bootstrap version line
+  window.__dashuaiSetAboutVersion = (v) => {
+    const el = $("#aboutVersionLine");
+    if (el) el.textContent = v ? `版本 ${v}` : "";
+  };
+  window.__dashuaiDefaultDisclaimer = DEFAULT_DISCLAIMER;
+})();
+
 document.body.addEventListener("click", (e) => {
   const btn = e.target.closest("[data-copy]");
   if (btn){
@@ -909,7 +1059,7 @@ $("#btnSaveKey").onclick = async () => {
     $("#homeKey").textContent = newKey;
     const syncRes = await syncWorkBuddy({ silent: true });
     const masked = (syncRes && syncRes.raw && syncRes.raw.api_key_masked) || newKey;
-    toast("本地 Key 已保存并同步到 WorkBuddy（" + masked + "）。请完全退出并重启 WorkBuddy。");
+    toast("本地 Key 已保存并写入客户端（" + masked + "）。WorkBuddy / Cursor 一般不用再改。");
     refresh();
   }catch(e){
     toast("保存失败：当前本地 Key 不正确", true);
@@ -972,7 +1122,15 @@ if ($("#btnRebuildSmartRoutes")) $("#btnRebuildSmartRoutes").onclick = async () 
 };
 
 
-if ($("#btnImportKeys")) $("#btnImportKeys").onclick = importSetupKeys;
+if ($("#btnImportKeys")) $("#btnImportKeys").onclick = () => importSetupKeys();
+if ($("#btnHomeParse")) $("#btnHomeParse").onclick = parseSetupPaste;
+if ($("#btnHomeImport")) $("#btnHomeImport").onclick = () => importSetupKeys({ stay: true });
+if ($("#btnHomeImportSync")) $("#btnHomeImportSync").onclick = () => importSetupKeys({ stay: true, syncWb: true });
+if ($("#btnHomeSyncWb")) $("#btnHomeSyncWb").onclick = () => syncWorkBuddy();
+if ($("#btnHomeCopyAll")) $("#btnHomeCopyAll").onclick = async () => {
+  const base = state.overview?.openai_base || $("#homeBase").textContent;
+  await copyText(`Base URL: ${base}\nAPI Key: ${state.localKey}\nModel: 日常`);
+};
 
 if ($("#btnImportSync")) $("#btnImportSync").onclick = async () => {
   await importSetupKeys();
@@ -997,11 +1155,11 @@ if ($("#btnModalSkip")) $("#btnModalSkip").onclick = () => {
   localStorage.setItem("dashuai_key_prompted", "1");
   if ($("#keyModal")) $("#keyModal").classList.remove("show");
 };
-(function maybeAskKey(){
-  if (localStorage.getItem("dashuai_key_prompted")) return;
-  if (state.localKey !== "sk-local-change-me") return;
-  if ($("#modalKey")) $("#modalKey").value = "sk-dashuai-" + Math.random().toString(36).slice(2,10);
-  if ($("#keyModal")) $("#keyModal").classList.add("show");
+(async function maybeAskKey(){
+  // 默认本地 Key 即可用，同步时会写入客户端；不再每次弹窗要求改 Key。
+  try { await bootstrapLocalKey(); } catch (_) {}
+  localStorage.setItem("dashuai_key_prompted", "1");
+  if ($("#keyModal")) $("#keyModal").classList.remove("show");
 })();
 
 
@@ -1027,14 +1185,17 @@ document.body.addEventListener("click", (ev) => {
       if (!ready.length && !sessionStorage.getItem("dashuai_setup_seen")) {
         sessionStorage.setItem("dashuai_setup_seen", "1");
         go("providers");
-        toast("粘贴上游 API Key → 点「保存并同步 WorkBuddy」→ 重启 WorkBuddy");
+        toast("粘贴上游 API Key → 点「保存并同步客户端」即可，不用改 WorkBuddy / Cursor 设置");
       }
     } catch (_) {}
   }, 500);
 })();
 
 refresh();
-setInterval(refresh, 15000);
+setInterval(refresh, 20000);
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) refresh();
+});
 
 
 
@@ -1201,21 +1362,73 @@ function upsertPresetChannel(list, preset){
 async function deploySelectedPresets(rootSel){
   const ids = selectedPresetIds(rootSel);
   if (!ids.length){ toast("请先勾选要部署的预设", true); return; }
+  await applyPresetIds(ids, true);
+}
+
+async function ensureAllPresetsPresent(opts){
+  const silent = !!(opts && opts.silent);
+  const ids = CHANNEL_PRESETS.map(p => p.id);
+  const before = (state.providers || []).length;
   const list = (state.providers || []).map(normalizeProvider);
   let added = 0, updated = 0;
-  const picked = [];
   for (const id of ids){
     const p = CHANNEL_PRESETS.find(x => x.id === id);
     if (!p) continue;
-    picked.push(p);
+    const r = upsertPresetChannel(list, p);
+    if (r === "added") added += 1; else updated += 1;
+  }
+  state.providers = list;
+  if (added > 0) {
+    state.dirtyProviders = true;
+    try {
+      await saveProviders(false);
+      state.dirtyProviders = false;
+      if (!silent) toast("已补齐 " + added + " 个缺失渠道（含商汤/豆包/混元等），请粘贴 Key 后启用");
+    } catch (_) {
+      if (!silent) toast("已写入列表，请点「保存全部」", true);
+    }
+  } else if (!silent) {
+    toast("渠道已齐全（" + before + " 个），无缺失");
+  }
+  if (typeof renderProviders === "function") renderProviders();
+  return { added, updated };
+}
+
+function renderFreeSignupList(){
+  const box = $("#freeSignupList");
+  if (!box) return;
+  box.innerHTML = CHANNEL_PRESETS.map(p => {
+    const vpn = p.region === "vpn";
+    const tag = vpn ? '<span class="tag-vpn">需 VPN</span>' : '<span class="tag-cn">国内</span>';
+    return `<div class="preset-card on" data-signup="${esc(p.id)}">
+      <div class="row"><div>
+        <div class="title">${esc(p.name)} ${tag}</div>
+        <div class="note">${esc(p.note)}</div>
+      </div></div>
+      <div class="url">${esc(p.signup)}</div>
+      <div class="acts">
+        <a class="btn btn-secondary btn-sm" href="${esc(p.signup)}" target="_blank" rel="noreferrer">去注册</a>
+        <button class="btn btn-ghost btn-sm" type="button" data-copy-url="${esc(p.signup)}">复制链接</button>
+      </div>
+    </div>`;
+  }).join("");
+  box.querySelectorAll("[data-copy-url]").forEach(b => {
+    b.onclick = (e) => { e.preventDefault(); e.stopPropagation(); copyText(b.dataset.copyUrl); };
+  });
+}
+
+async function applyPresetIds(ids, goProviders){
+  const list = (state.providers || []).map(normalizeProvider);
+  let added = 0, updated = 0;
+  for (const id of ids){
+    const p = CHANNEL_PRESETS.find(x => x.id === id);
+    if (!p) continue;
     const r = upsertPresetChannel(list, p);
     if (r === "added") added += 1; else updated += 1;
   }
   state.providers = list;
   state.dirtyProviders = true;
 
-  
-  // 重建路由：按 usage 日志成功率优选（每类最多10个）
   let rebuildMsg = "";
   try {
     const j = await rebuildSmartRoutes(false);
@@ -1227,8 +1440,7 @@ async function deploySelectedPresets(rootSel){
   }
 
   const msg = `已写入 ${ids.length} 个渠道（新增 ${added} / 更新 ${updated}）${rebuildMsg}`;
-
-  const el = document.getElementById("presetResult") || document.getElementById("presetResult");
+  const el = document.getElementById("presetResult");
   if (el) el.textContent = msg;
   try{
     await saveProviders(false);
@@ -1240,18 +1452,19 @@ async function deploySelectedPresets(rootSel){
       toast("渠道已保存，但路由写入失败，请到「路由模型」手动保存", true);
     }
     if (el) el.textContent = msg + " · 已保存";
-    toast(msg + "。请到上游渠道粘贴 Key（有 Key 会自动启用）→「保存并同步 WorkBuddy」→ 完全重启 WorkBuddy");
+    toast(msg + "。请到上游渠道粘贴 Key（有 Key 会自动启用）→「保存并同步客户端」");
   }catch(_){
     toast(msg + "，请到上游渠道点「保存全部」", true);
   }
   if (typeof renderProviders === "function") renderProviders();
   if (typeof renderRoutes === "function") renderRoutes();
-  if (typeof go === "function") go("providers");
+  if (goProviders && typeof go === "function") go("providers");
 }
 
 function bootPresetPicker(){
   renderPresetGrid("#presetGrid", "#presetGrid2");
   renderPresetGrid("#presetGrid2", "#presetGrid");
+  renderFreeSignupList();
   const bind = (id, fn) => { const el = document.getElementById(id); if (el) el.onclick = fn; };
   bind("btnPresetCn", () => setPresetFilter("cn"));
   bind("btnPresetVpn", () => setPresetFilter("vpn"));
@@ -1259,8 +1472,11 @@ function bootPresetPicker(){
   bind("btnPresetNone", () => setPresetFilter("none"));
   bind("btnPresetCn2", () => setPresetFilter("cn"));
   bind("btnPresetVpn2", () => setPresetFilter("vpn"));
+  bind("btnPresetAll2", () => setPresetFilter("all"));
   bind("btnDeployPresets", () => deploySelectedPresets("#presetGrid"));
   bind("btnDeployPresets2", () => deploySelectedPresets("#presetGrid2"));
+  bind("btnEnsureAllPresets", () => ensureAllPresetsPresent({ silent: false }));
+  bind("btnEnsureAllPresetsSetup", () => ensureAllPresetsPresent({ silent: false }));
 }
 
 async function saveAndSyncWorkBuddy(){
@@ -1269,14 +1485,14 @@ async function saveAndSyncWorkBuddy(){
     try { await rebuildSmartRoutes(false); } catch (_) {}
     const res = await syncWorkBuddy({ silent: true });
     if (!res) {
-      toast("渠道已保存，但同步 WorkBuddy 失败（请确认本地 Key 与网关一致）", true);
+      toast("渠道已保存，但同步客户端失败（请确认本地 Key 与网关一致）", true);
       return;
     }
     if (!res.ready) {
-      toast("渠道已保存并写入 WorkBuddy，但还没有可用上游——请确认至少粘贴了一个有效 API Key", true);
+      toast("渠道已保存并写入客户端，但还没有可用上游——请确认至少粘贴了一个有效 API Key", true);
       return;
     }
-    toast("已保存并同步 WorkBuddy（" + res.count + " 个模型）。请完全退出并重启 WorkBuddy，且保持本网关运行。");
+    toast("已保存并同步到本机客户端（" + res.count + " 个模型）。在模型列表选「日常 · 大帅网关」即可，不用改设置。");
   }catch(e){
     toast("保存/同步失败：" + (e.message || "未知错误"), true);
   }
@@ -1422,14 +1638,12 @@ state.routeFilter = state.routeFilter || "";
       const j = await r.json();
       const key = String(j.local_api_key || "").trim();
       if (!key) return;
-      const cur = String(state.localKey || "").trim();
-      const isDefault = !cur || cur.includes("change-me") || cur === "sk-local-change-me";
-      if (isDefault || cur !== key){
-        state.localKey = key;
-        localStorage.setItem("dashuai_local_key", key);
-        if ($("#localKey")) $("#localKey").value = key;
-        if ($("#homeKey")) $("#homeKey").textContent = key;
-      }
+      // Server config is source of truth for the local gateway Key.
+      // Do not keep a stale browser-only Key that would later overwrite config via WorkBuddy sync.
+      state.localKey = key;
+      localStorage.setItem("dashuai_local_key", key);
+      if ($("#localKey")) $("#localKey").value = key;
+      if ($("#homeKey")) $("#homeKey").textContent = key;
     }catch(_){}
   }
 
@@ -1524,6 +1738,32 @@ state.routeFilter = state.routeFilter || "";
     toast(j.message || "已尝试上报");
     loadLicenseStatus(true);
   };
+  async function loadUsageHistory(){
+    const body = $("#usageHistoryBody");
+    if (!body) return;
+    try{
+      const r = await fetch("/api/license/usage-history?limit=30", { headers: authHeaders() });
+      const j = await r.json().catch(()=>({}));
+      if (!r.ok) {
+        body.innerHTML = `<tr><td colspan="4" style="color:var(--muted)">${esc((j.detail && j.detail.message) || j.detail || "请先登录")}</td></tr>`;
+        return;
+      }
+      const items = j.items || [];
+      if (!items.length) {
+        body.innerHTML = `<tr><td colspan="4" style="color:var(--muted)">暂无用量记录</td></tr>`;
+        return;
+      }
+      body.innerHTML = items.map(it => `<tr>
+        <td>${esc(String(it.createTime || "").slice(0,19))}</td>
+        <td>${esc(String(it.requestId || "").slice(0,16))}</td>
+        <td>${esc(String(it.tokens ?? 0))}</td>
+        <td>${it.estimated ? "是" : "否"}</td>
+      </tr>`).join("");
+    }catch(_){
+      body.innerHTML = `<tr><td colspan="4" style="color:var(--muted)">加载失败</td></tr>`;
+    }
+  }
+  if ($("#btnUsageHistory")) $("#btnUsageHistory").onclick = () => loadUsageHistory();
 
   async function refreshBackupList(){
     const box = $("#backupList");
@@ -1714,8 +1954,9 @@ state.routeFilter = state.routeFilter || "";
     const pill = $("#licensePill");
     if (pill) {
       pill.textContent = fmtRemain(snap);
-      const low = snap && !snap.token_unlimited && snap.token_quota > 0 && snap.token_remaining != null
-        && Number(snap.token_remaining) / Number(snap.token_quota) < 0.1;
+      const low = (snap && (snap.lowBalance || snap.low_balance))
+        || (snap && !snap.token_unlimited && snap.token_quota > 0 && snap.token_remaining != null
+          && Number(snap.token_remaining) / Number(snap.token_quota) < 0.1);
       pill.style.color = low ? "#fecaca" : "";
     }
     const pendingChip = $("#pendingUsageChip");
@@ -1726,6 +1967,7 @@ state.routeFilter = state.routeFilter || "";
     }
     state.license = snap;
     paintAccount(snap);
+    if (snap && snap.logged_in) loadUsageHistory();
   }
   window.paintLicense = paintLicense;
 
@@ -1757,7 +1999,7 @@ state.routeFilter = state.routeFilter || "";
   async function loadRemoteBootstrap(){
     try{
       const ctrl = new AbortController();
-      const t = setTimeout(() => ctrl.abort(), 10000);
+      const t = setTimeout(() => ctrl.abort(), 3500);
       const r = await fetch("/api/remote/bootstrap", { signal: ctrl.signal });
       clearTimeout(t);
       const j = await r.json();
@@ -1769,7 +2011,10 @@ state.routeFilter = state.routeFilter || "";
       }
       if ($("#guideStepsText")) $("#guideStepsText").textContent = j.guideSteps || "";
       if ($("#apiKeyGuideText")) $("#apiKeyGuideText").textContent = j.apiKeyGuide || "";
-      if ($("#disclaimerText")) $("#disclaimerText").textContent = j.disclaimer || "";
+      if ($("#disclaimerText")) $("#disclaimerText").textContent = j.disclaimer || (window.__dashuaiDefaultDisclaimer || "");
+      if (window.__dashuaiSetAboutVersion) {
+        window.__dashuaiSetAboutVersion((state.overview && state.overview.version) || j.version || "");
+      }
       if ($("#navVer") && j.latestVersion) $("#navVer").textContent = "v" + (state.overview && state.overview.version ? state.overview.version : j.version || "") + " / 远端 " + j.latestVersion;
       return j;
     }catch(_){ return null; }
@@ -1785,7 +2030,7 @@ state.routeFilter = state.routeFilter || "";
   function hideGate(){ const g = $("#licenseGate"); if (g) g.classList.remove("show"); }
 
   function gateDisclaimer(){
-    const text = (lic.remote && lic.remote.disclaimer) || "本软件仅供个人学习与合法用途。";
+    const text = (lic.remote && lic.remote.disclaimer) || "本软件免费提供个人学习与合法用途使用，但并非开源软件。禁止反编译、破解、二次分发源码、出售、捆绑或任何商业用途。使用本软件即表示你已阅读并同意上述条款；作者不对使用后果承担责任。";
     showGate(`<h2>免责声明</h2><p class="desc">${esc(text)}</p>
       <label class="switch" style="margin-bottom:14px"><input type="checkbox" id="agreeChk" /> 我已阅读并同意</label>
       <button class="btn btn-primary" type="button" id="btnAgree">继续</button>`);
@@ -1923,7 +2168,19 @@ state.routeFilter = state.routeFilter || "";
     if (!grid) return;
     try{
       const r = await fetch("/api/shop/catalog");
-      const j = await r.json();
+      if (r.status === 503){
+        grid.innerHTML = `<div class="empty">商店暂时不可用（授权服务未连通）。请检查网络 / license_api_base，稍后重试。<br><button class="btn btn-secondary btn-sm" type="button" id="btnShopRetry">重试加载</button></div>`;
+        const btn = $("#btnShopRetry");
+        if (btn) btn.onclick = () => renderSkus(gridSel, paySel, fromGate);
+        return;
+      }
+      const j = await r.json().catch(()=>({}));
+      if (!r.ok){
+        grid.innerHTML = `<div class="empty">加载商品失败（HTTP ${r.status}）。<button class="btn btn-secondary btn-sm" type="button" id="btnShopRetry">重试</button></div>`;
+        const btn = $("#btnShopRetry");
+        if (btn) btn.onclick = () => renderSkus(gridSel, paySel, fromGate);
+        return;
+      }
       const prices = (j.prices || []).filter(p => p.enabled !== false);
       if (!prices.length){ grid.innerHTML = `<div class="empty">暂无商品（请确认授权服务已配置大帅网关 SKU）</div>`; return; }
       grid.innerHTML = prices.map(p => {
@@ -1935,7 +2192,9 @@ state.routeFilter = state.routeFilter || "";
         el.onclick = () => createOrder(Number(el.dataset.priceId), pay, fromGate);
       });
     }catch(e){
-      grid.innerHTML = `<div class="empty">加载失败：${esc(e.message||"")}</div>`;
+      grid.innerHTML = `<div class="empty">商店加载失败：${esc(e.message||"网络错误")}。<button class="btn btn-secondary btn-sm" type="button" id="btnShopRetry">重试</button></div>`;
+      const btn = $("#btnShopRetry");
+      if (btn) btn.onclick = () => renderSkus(gridSel, paySel, fromGate);
     }
   }
 
@@ -2032,19 +2291,33 @@ state.routeFilter = state.routeFilter || "";
       const r = await fetch("/api/update/check");
       const j = await r.json().catch(()=>({}));
       if (!r.ok) throw new Error("check failed");
+      if (applyForceUpdate(j)) return;
       if (!j.update_available) {
         toast("已是最新版本 " + (j.latest_version || j.local_version));
         return;
       }
       let msg = "发现新版本 " + j.latest_version + "（当前 " + j.local_version + "）";
-      if (j.download_sha256) msg += "\nSHA256: " + j.download_sha256.slice(0, 16) + "…";
-      toast(msg + (j.download_url ? "，正在打开下载页" : ""));
+      if (j.download_sha256) msg += "\nSHA256: " + j.download_sha256;
+      if (j.download_url && j.download_sha256) {
+        toast(msg + "\n正在打开下载；请自行核对安装包 SHA256");
+      } else {
+        toast(msg + (j.download_url ? "，正在打开下载页" : ""));
+      }
       if (j.download_url) window.open(j.download_url, "_blank");
     }catch(_){
       const j = await loadRemoteBootstrap();
       const local = (state.overview && state.overview.version) || (j && j.version) || "";
       const latest = j && j.latestVersion;
       if (!latest){ toast("无法获取远端版本"); return; }
+      if (applyForceUpdate({
+        update_available: String(local) !== String(latest),
+        latest_version: latest,
+        local_version: local,
+        download_url: j.downloadUrl,
+        download_sha256: j.downloadSha256,
+        changelog: j.changelog,
+        force_update: j.forceUpdate
+      })) return;
       if (String(local) === String(latest)) toast("已是最新版本 " + latest);
       else {
         toast("发现新版本 " + latest + (j.downloadUrl ? "，正在打开下载页" : ""));
@@ -2053,6 +2326,42 @@ state.routeFilter = state.routeFilter || "";
     }
   };
 
+  function applyForceUpdate(j){
+    const gate = $("#forceUpdateGate");
+    if (!gate) return false;
+    const must = !!(j && (j.force_update || j.forceUpdate) && j.update_available);
+    if (!must){
+      gate.classList.remove("show");
+      return false;
+    }
+    const latest = j.latest_version || j.latestVersion || "";
+    const local = j.local_version || j.localVersion || "";
+    const desc = $("#forceUpdateDesc");
+    if (desc){
+      desc.textContent = "发现必须安装的新版本 " + latest + (local ? "（当前 " + local + "）" : "") + "。\n" + (j.changelog || "请下载安装后再继续使用。");
+    }
+    const sha = $("#forceUpdateSha");
+    if (sha) sha.textContent = j.download_sha256 || j.downloadSha256 ? ("SHA256: " + (j.download_sha256 || j.downloadSha256)) : "";
+    const btn = $("#btnForceUpdateDownload");
+    if (btn){
+      btn.onclick = () => {
+        const url = j.download_url || j.downloadUrl;
+        if (url) window.open(url, "_blank");
+        else toast("暂无下载地址，请联系客服");
+      };
+    }
+    gate.classList.add("show");
+    return true;
+  }
+
+  async function pollForceUpdate(){
+    try{
+      const r = await fetch("/api/update/check");
+      const j = await r.json().catch(()=>({}));
+      if (r.ok) applyForceUpdate(j);
+    }catch(_){}
+  }
+
   const _go2 = go;
   go = function(page){
     _go2(page);
@@ -2060,7 +2369,8 @@ state.routeFilter = state.routeFilter || "";
     if (page === "guide") loadRemoteBootstrap();
   };
 
-  runLicenseGate().then(() => {});
+  runLicenseGate().then(() => { pollForceUpdate(); });
   setInterval(() => { loadLicenseStatus(true); }, 60000);
+  setInterval(pollForceUpdate, 120000);
 })();
 

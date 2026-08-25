@@ -41,6 +41,7 @@ from .proxy import (
     is_snappy_route,
     prepare_body_for_upstream,
     probe_provider,
+    remount_route_for_tools,
     usage_csv,
     usage_for_ui,
     usage_summary,
@@ -820,6 +821,12 @@ async def _chat_completions_inner(request: Request):
     timeout = float(cfg.get("request_timeout_sec") or 120)
     max_retries = int(cfg.get("max_retries_per_request") or 3)
     has_tools = bool(body.get("tools"))
+    # WorkBuddy 画布/Ardot：即使用户选了「识图」，也强制改走 Agent，避免 VL 死磕 batch_edit。
+    remounted = remount_route_for_tools(client_model, body)
+    if remounted != client_model:
+        client_model = remounted
+        body = dict(body)
+        body["model"] = client_model
     fast = is_fast_route(client_model)
     daily = is_daily_route(client_model)
     snappy = is_snappy_route(client_model)

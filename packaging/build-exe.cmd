@@ -35,5 +35,5 @@ echo.
 echo 完成: dist\DashuaiGateway.exe
 echo 校验: dist\DashuaiGateway.exe.sha256
 echo 可一起转发: dist\发给别人-使用说明.md
-echo 双击即可打开独立窗口（不再弹出浏览器）
+echo 双击即可打开（控制台会自动隐藏；需 WebView2 运行时，Win10/11 通常已自带）
 exit /b 0

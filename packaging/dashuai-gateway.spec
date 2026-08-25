@@ -107,7 +107,9 @@ exe = EXE(
     upx=False,
     upx_exclude=[],
     runtime_tmpdir=None,
-    console=False,
+    # 必须用 console 引导程序：windowed(runw) 在本机/多数环境会
+    # 「Failed to start embedded python interpreter」。启动后由 run_desktop 隐藏黑窗。
+    console=True,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,

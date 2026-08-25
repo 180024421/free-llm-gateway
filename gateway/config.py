@@ -27,18 +27,42 @@ def _ensure_from_example(name: str) -> Path:
 def load_json(path: Path, default: Any) -> Any:
     if not path.exists():
         return default
-    with path.open("r", encoding="utf-8-sig") as f:
-        return json.load(f)
+    try:
+        text = path.read_text(encoding="utf-8-sig")
+    except OSError:
+        return default
+    text = text.strip()
+    if not text:
+        return default
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        # Concurrent writers may leave trailing fragments after a valid object.
+        try:
+            obj, _end = json.JSONDecoder().raw_decode(text)
+            try:
+                # Best-effort self-heal so UI stops 500-ing.
+                path.write_text(
+                    json.dumps(obj, ensure_ascii=False, indent=2) + "\n",
+                    encoding="utf-8",
+                )
+            except OSError:
+                pass
+            return obj
+        except Exception:
+            return default
 
 
 def save_json(path: Path, data: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
-    with tmp.open("w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-        f.write("\n")
-    tmp.replace(path)
     with _lock:
+        with tmp.open("w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+            f.write("\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
         _cache.pop(path.name, None)
 
 

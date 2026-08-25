@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import codecs
 import json
 import time
 import uuid
@@ -451,6 +452,7 @@ class SseModelRewriter:
     def __init__(self, client_model: str) -> None:
         self.client_model = client_model
         self._buf = ""
+        self._utf8 = codecs.getincrementaldecoder("utf-8")()
         self.saw_usable = False
         self.saw_done = False
         self.content_chars = 0
@@ -459,10 +461,17 @@ class SseModelRewriter:
         self.last_usage: dict[str, Any] | None = None
 
     def feed(self, chunk: bytes) -> bytes:
+        if not chunk:
+            return b""
+        # Incremental decode: never pass through a mid-character UTF-8 slice while
+        # a partial SSE line is buffered (that corrupts Chinese streams).
         try:
-            text = chunk.decode("utf-8")
+            text = self._utf8.decode(chunk, final=False)
         except UnicodeDecodeError:
+            self._utf8 = codecs.getincrementaldecoder("utf-8")()
             return chunk
+        if not text:
+            return b""
         self._buf += text
         out: list[str] = []
         while True:
@@ -472,9 +481,17 @@ class SseModelRewriter:
             line = self._buf[: idx_n + 1]
             self._buf = self._buf[idx_n + 1 :]
             out.append(self._rewrite_line(line))
+        # ASCII-safe wire form avoids re-splitting multi-byte Chinese on next hop.
         return "".join(out).encode("utf-8")
 
     def flush(self) -> bytes:
+        try:
+            tail = self._utf8.decode(b"", final=True)
+        except UnicodeDecodeError:
+            tail = ""
+        self._utf8 = codecs.getincrementaldecoder("utf-8")()
+        if tail:
+            self._buf += tail
         if not self._buf:
             return b""
         line = self._buf
@@ -540,7 +557,8 @@ class SseModelRewriter:
                     if payload_has_usable_text(data):
                         self.saw_usable = True
                     data = rewrite_model_field(data, self.client_model, stream_delta=True)
-                    body = "data: " + json.dumps(data, ensure_ascii=False)
+                    # ensure_ascii=True：中文变成 \uXXXX，避免再次被 TCP 拆开导致乱码
+                    body = "data: " + json.dumps(data, ensure_ascii=True)
                 except Exception:
                     pass
         return body + ends
@@ -585,6 +603,42 @@ def is_coding_route(client_model: str) -> bool:
     raw = (client_model or "").strip()
     m = raw.lower()
     return raw in {"代码", "Agent", "agent"} or m in {"code", "agent"}
+
+
+def is_vision_route(client_model: str) -> bool:
+    raw = (client_model or "").strip()
+    return raw in {"识图", "vision"} or raw.lower() == "vision"
+
+
+def looks_like_design_tools(body: dict[str, Any]) -> bool:
+    """WorkBuddy Ardot / design MCP tools — must not run on VL routes."""
+    tools = body.get("tools")
+    if not tools:
+        return False
+    try:
+        blob = json.dumps(tools, ensure_ascii=False).lower()
+    except Exception:
+        blob = str(tools).lower()
+    needles = (
+        "ardot",
+        "batch_edit",
+        "design-core",
+        "design_core",
+        "design-router",
+        "design_router",
+        "ardot-design",
+    )
+    return any(n in blob for n in needles)
+
+
+def remount_route_for_tools(client_model: str, body: dict[str, Any]) -> str:
+    """If canvas/design tools (or any tools on 识图), force Agent text models."""
+    has_tools = bool(body.get("tools"))
+    if not has_tools:
+        return client_model
+    if looks_like_design_tools(body) or is_vision_route(client_model):
+        return "Agent"
+    return client_model
 
 
 def prefer_low_reasoning(body: dict[str, Any], client_model: str) -> dict[str, Any]:
