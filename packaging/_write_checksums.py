@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -22,13 +23,17 @@ def sha256(path: Path) -> str:
 
 
 def write_manifest() -> None:
-    manifest = {
-        "web/index.html": sha256(ROOT / "web" / "index.html"),
-        "gateway/license.py": sha256(ROOT / "gateway" / "license.py"),
-        "gateway/commercial.py": sha256(ROOT / "gateway" / "commercial.py"),
-        "gateway/workbuddy.py": sha256(ROOT / "gateway" / "workbuddy.py"),
-        "gateway/ide_sync.py": sha256(ROOT / "gateway" / "ide_sync.py"),
-    }
+    # 只校验「以 datas 打进包」的文件。gateway/*.py 在单文件 EXE 里进 PYZ，
+    # 运行时 _MEIPASS 下没有对应源文件，写进清单会导致误报篡改。
+    files = [
+        "web/index.html",
+    ]
+    manifest = {}
+    for rel in files:
+        path = ROOT / rel.replace("/", os.sep)
+        if not path.is_file():
+            raise SystemExit(f"missing for manifest: {rel}")
+        manifest[rel] = sha256(path)
     out = ROOT / "data" / "integrity.manifest.json"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")

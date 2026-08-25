@@ -43,22 +43,34 @@ def expected_manifest() -> dict[str, str]:
 
 
 def verify_critical_files(rel_paths: Iterable[str] | None = None) -> tuple[bool, str]:
-    """Return (ok, message). Missing manifest = skip (dev builds)."""
+    """Return (ok, message). Missing manifest = skip (dev builds).
+
+    Frozen one-file builds only extract datas (e.g. web/). Python modules live in PYZ
+    and must not be treated as missing/tampered.
+    """
     manifest = expected_manifest()
     if not manifest:
         return True, "no-manifest"
     root = _bundle_root()
+    frozen = bool(getattr(sys, "frozen", False))
     paths = list(rel_paths) if rel_paths else list(manifest.keys())
+    checked = 0
     for rel in paths:
         expect = manifest.get(rel)
         if not expect:
             continue
-        path = root / rel
+        path = root.joinpath(*str(rel).replace("\\", "/").split("/"))
         if not path.is_file():
+            if frozen:
+                # Source modules are not unpacked as loose files in onefile mode.
+                continue
             return False, f"missing:{rel}"
         got = file_sha256(path)
         if got.lower() != expect.lower():
             return False, f"mismatch:{rel}"
+        checked += 1
+    if frozen and checked == 0 and manifest:
+        return False, "no-checkable-files"
     return True, "ok"
 
 
