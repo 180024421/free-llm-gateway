@@ -1,0 +1,7 @@
+{
+  "web/index.html": "bdaaceceb0dfec4ab017664ade2d45e732a00accb91a6ebcb9c4cc935eb4bbd3",
+  "gateway/license.py": "31620153595aa03d1820381e0179da0f99e21c9b6e5b96b8e9a3ac8ae36b4b9e",
+  "gateway/commercial.py": "78e71030812aec201ac8a996de019719ef24e8c2b0e2453061c612a4f22be07c",
+  "gateway/workbuddy.py": "7b2a0231a6c5afad1ca98ff5e33d6f73fdb286bf98ecd63fe41cc63f771dd557",
+  "gateway/ide_sync.py": "bfe2fda58c3493dc6a6411df3a7c2885264af25d1c5d38b9995e18b9df93f833"
+}

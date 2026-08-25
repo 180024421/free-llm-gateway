@@ -23,10 +23,16 @@ class ChannelHealth:
             return 0.0
         total = self.successes + self.failures
         avail = 1.0 if total == 0 else self.successes / total
+        # Prefer low-latency winners more aggressively (TTFT-sensitive clients).
         latency_penalty = 1.0
         if self.last_latency_ms is not None:
-            latency_penalty = max(0.2, 1.0 - min(self.last_latency_ms, 8000) / 10000)
-        return max(0.01, weight) * avail * latency_penalty
+            latency_penalty = max(0.15, 1.0 - min(self.last_latency_ms, 6000) / 7000)
+        freshness = 1.0
+        if self.last_ok_at is not None:
+            age = now - float(self.last_ok_at)
+            # Slightly prefer recently successful channels.
+            freshness = max(0.85, 1.0 - min(age, 3600) / 12000)
+        return max(0.01, weight) * avail * latency_penalty * freshness
 
     def mark_ok(self, latency_ms: float) -> None:
         self.successes += 1

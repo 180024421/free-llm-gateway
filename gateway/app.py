@@ -11,6 +11,11 @@ from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import __product__, __product_en__, __version__
+
+DEFAULT_DISCLAIMER = (
+    "本软件提供个人授权使用（非开源）。个人授权仅限本人；商用授权须另行取得书面许可。"
+    "禁止反编译、破解、篡改、二次分发源码或改包再分发。使用即表示同意上述条款。"
+)
 from .config import (
     load_config,
     load_providers,
@@ -30,8 +35,10 @@ from .proxy import (
     forward_chat,
     is_coding_route,
     is_complex_route,
+    is_daily_route,
     is_fast_route,
     is_novel_route,
+    is_snappy_route,
     prepare_body_for_upstream,
     probe_provider,
     usage_csv,
@@ -69,7 +76,9 @@ from .license import (
     license_required,
     load_session,
     refresh_status,
+    release_quota,
     require_entitlement,
+    reserve_quota,
     save_session,
 )
 
@@ -113,6 +122,13 @@ def _usable_chat_payload(raw: Any) -> bool:
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     try:
+        from .commercial import enforce_commercial_config, unify_local_api_key
+
+        enforce_commercial_config()
+        unify_local_api_key()
+    except Exception:
+        pass
+    try:
         apply_to_state(STATE)
     except Exception:
         pass
@@ -129,6 +145,18 @@ async def lifespan(_: FastAPI):
                 await refresh_status(force=True)
         except Exception:
             pass
+
+    async def _license_refresh_loop() -> None:
+        import asyncio
+
+        while True:
+            await asyncio.sleep(180)
+            try:
+                if license_required():
+                    await flush_pending_usage()
+                    await refresh_status(force=True)
+            except Exception:
+                pass
 
     async def _health_probe_loop() -> None:
         import asyncio
@@ -157,6 +185,7 @@ async def lifespan(_: FastAPI):
 
         start_usage_writer()
         asyncio.create_task(_license_warmup())
+        asyncio.create_task(_license_refresh_loop())
         asyncio.create_task(_health_probe_loop())
     except Exception:
         pass
@@ -277,7 +306,7 @@ def _auth(
         detail={
             "code": "LOCAL_KEY_MISMATCH",
             "message": "本地 API Key 不正确",
-            "hint": "WorkBuddy 的 apiKey 必须与网关一致。请在面板点「同步 WorkBuddy」，然后完全退出并重启 WorkBuddy（任务栏右键退出）。",
+            "hint": "客户端的 apiKey 必须与网关一致。请在面板点「同步到本机客户端」（会自动写入 WorkBuddy / Cursor，一般不用改设置）。",
         },
     )
 
@@ -428,16 +457,55 @@ async def api_license_flush_usage(_: None = Depends(_auth)) -> dict[str, Any]:
 
 @app.get("/api/update/check")
 async def api_update_check() -> dict[str, Any]:
-    meta = await api_remote_bootstrap()
+    from .versioning import is_newer
+
     local = __version__
-    latest = str(meta.get("latestVersion") or local)
+    latest = local
+    download_url = ""
+    download_sha256 = ""
+    changelog = ""
+    force_update = False
+    maintenance = False
+    # Prefer dedicated app-update catalog; fall back to bootstrap meta.
+    try:
+        data = await jane_request("GET", "/app-update/dashuai-gateway", timeout=8.0)
+        if isinstance(data, dict):
+            latest = str(data.get("versionName") or data.get("version_name") or latest)
+            download_url = str(data.get("desktopUrl") or data.get("desktop_url") or "")
+            download_sha256 = str(data.get("downloadSha256") or data.get("download_sha256") or "")
+            changelog = str(data.get("changelog") or "")
+            force_update = bool(data.get("forceUpdate") or data.get("force_update"))
+    except Exception:
+        meta = await api_remote_bootstrap()
+        latest = str(meta.get("latestVersion") or local)
+        download_url = str(meta.get("downloadUrl") or "")
+        download_sha256 = str(meta.get("downloadSha256") or "")
+        changelog = str(meta.get("changelog") or "")
+        force_update = bool(meta.get("forceUpdate") or meta.get("force_update"))
+        maintenance = bool(meta.get("maintenanceEnabled"))
+    else:
+        try:
+            meta = await api_remote_bootstrap()
+            maintenance = bool(meta.get("maintenanceEnabled"))
+            if not download_url:
+                download_url = str(meta.get("downloadUrl") or "")
+            if not download_sha256:
+                download_sha256 = str(meta.get("downloadSha256") or "")
+            if not changelog:
+                changelog = str(meta.get("changelog") or "")
+            if not force_update:
+                force_update = bool(meta.get("forceUpdate") or meta.get("force_update"))
+        except Exception:
+            pass
     return {
         "local_version": local,
         "latest_version": latest,
-        "update_available": str(latest) != str(local),
-        "download_url": meta.get("downloadUrl") or "",
-        "download_sha256": meta.get("downloadSha256") or meta.get("download_sha256") or "",
-        "maintenance": bool(meta.get("maintenanceEnabled")),
+        "update_available": is_newer(latest, local),
+        "download_url": download_url,
+        "download_sha256": download_sha256,
+        "changelog": changelog,
+        "force_update": force_update,
+        "maintenance": maintenance,
     }
 
 
@@ -540,6 +608,8 @@ async def put_config(request: Request, _: None = Depends(_auth)) -> dict[str, An
         "fast_tool_request_timeout_sec",
         "fast_request_timeout_sec",
         "fast_max_retries",
+        "daily_stream_stall_sec",
+        "daily_request_timeout_sec",
         "complex_stream_stall_sec",
         "complex_tool_stream_stall_sec",
         "complex_request_timeout_sec",
@@ -557,6 +627,7 @@ async def put_config(request: Request, _: None = Depends(_auth)) -> dict[str, An
         "novel_preferred_provider",
         "novel_stream_mode",
         "encrypt_provider_keys",
+        "encrypt_session",
         "workbuddy_enable_agent_teams",
         "fast_hedged_requests",
         "fast_hedge_candidates",
@@ -564,9 +635,23 @@ async def put_config(request: Request, _: None = Depends(_auth)) -> dict[str, An
         "provider_max_concurrent",
         "provider_concurrency_limit",
         "usage_async_write",
+        "license_online_cache_sec",
+        "license_offline_grace_sec",
+        "license_reserve_tokens",
+        "bill_estimated_usage",
+        "license_allow_insecure_http",
     ):
         if key in body:
             cfg[key] = body[key]
+    # Commercial builds refuse to turn off license via API.
+    try:
+        from .commercial import is_commercial_build
+
+        if is_commercial_build(cfg):
+            cfg["require_license"] = True
+            cfg["commercial_mode"] = True
+    except Exception:
+        pass
     save_config(cfg)
     return {"status": "saved", "config": cfg}
 
@@ -712,6 +797,19 @@ def models_alias(_: None = Depends(_auth)) -> dict[str, Any]:
 async def chat_completions(request: Request, _: None = Depends(_auth)):
     await ensure_not_maintenance()
     await require_entitlement()
+    reserved = 0
+    try:
+        reserved = await reserve_quota()
+        return await _chat_completions_inner(request)
+    finally:
+        if reserved:
+            try:
+                await release_quota(reserved)
+            except Exception:
+                pass
+
+
+async def _chat_completions_inner(request: Request):
     cfg, providers, routers = reload_all()
     body = await request.json()
     if not isinstance(body, dict):
@@ -723,15 +821,32 @@ async def chat_completions(request: Request, _: None = Depends(_auth)):
     max_retries = int(cfg.get("max_retries_per_request") or 3)
     has_tools = bool(body.get("tools"))
     fast = is_fast_route(client_model)
+    daily = is_daily_route(client_model)
+    snappy = is_snappy_route(client_model)
     complex_route = is_complex_route(client_model)
     novel_route = is_novel_route(client_model)
     coding_route = is_coding_route(client_model)
 
-    # Fast routes: low reasoning + short stall so WorkBuddy Agent feels snappy.
+    # Snappy routes: low reasoning + short stall so WorkBuddy Agent feels snappy.
     body = prepare_body_for_upstream(body, client_model)
-    if fast:
-        stall_sec = float(cfg.get("fast_stream_stall_sec") or cfg.get("stream_stall_sec") or 5)
-        timeout = min(timeout, float(cfg.get("fast_request_timeout_sec") or 20))
+    if snappy:
+        stall_sec = float(
+            cfg.get("fast_stream_stall_sec")
+            if fast
+            else cfg.get("daily_stream_stall_sec")
+            or cfg.get("stream_stall_sec")
+            or 5
+        )
+        timeout = min(
+            timeout,
+            float(
+                cfg.get("fast_request_timeout_sec")
+                if fast
+                else cfg.get("daily_request_timeout_sec")
+                or cfg.get("fast_request_timeout_sec")
+                or 25
+            ),
+        )
         if has_tools:
             stall_sec = float(cfg.get("fast_tool_stream_stall_sec") or 8)
             timeout = min(
@@ -879,7 +994,7 @@ async def chat_completions(request: Request, _: None = Depends(_auth)):
         try_n = min(len(candidates), max(max_retries, int(cfg.get("novel_max_retries") or 6)))
 
     use_hedge = (
-        fast
+        snappy
         and bool(cfg.get("fast_hedged_requests", True))
         and (not has_tools or bool(cfg.get("fast_hedge_with_tools", False)))
         and len(candidates) >= 2
@@ -927,6 +1042,28 @@ async def api_license_status(refresh: bool = False) -> dict[str, Any]:
     return entitlement_snapshot()
 
 
+@app.get("/api/license/usage-history")
+async def api_license_usage_history(limit: int = 50) -> dict[str, Any]:
+    if not license_required():
+        return {"items": []}
+    sess = load_session()
+    if not sess.get("token"):
+        raise HTTPException(status_code=401, detail="未登录")
+    data = await jane_request(
+        "GET",
+        f"/gateway/license/usage-history?limit={max(1, min(200, int(limit or 50)))}",
+        timeout=12.0,
+    )
+    if isinstance(data, list):
+        items = data
+    elif isinstance(data, dict):
+        raw = data.get("items") or data.get("list") or data.get("records") or []
+        items = raw if isinstance(raw, list) else []
+    else:
+        items = []
+    return {"items": items}
+
+
 @app.get("/api/remote/bootstrap")
 async def api_remote_bootstrap() -> dict[str, Any]:
     cfg = load_config()
@@ -940,8 +1077,8 @@ async def api_remote_bootstrap() -> dict[str, Any]:
         return {
             **local,
             "announcement": "未配置授权服务地址（license_api_base）。开发模式可关闭 require_license。",
-            "disclaimer": "本软件仅供个人学习与合法用途。",
-            "guideSteps": "1. 配置上游 Key\n2. 同步 WorkBuddy\n3. 重启 WorkBuddy",
+            "disclaimer": DEFAULT_DISCLAIMER,
+            "guideSteps": "1. 配置上游 Key\n2. 点「同步到本机客户端」（自动写入 WorkBuddy / Cursor 等）\n3. 模型列表选「日常 · 大帅网关」",
             "apiKeyGuide": "到上游平台注册并复制 API Key，粘贴到「上游渠道」。",
             "latestVersion": __version__,
             "downloadUrl": "",
@@ -953,7 +1090,7 @@ async def api_remote_bootstrap() -> dict[str, Any]:
         return {
             **local,
             "announcement": "授权服务暂时不可达，可稍后点「检查更新」重试。",
-            "disclaimer": "本软件仅供个人学习与合法用途。",
+            "disclaimer": DEFAULT_DISCLAIMER,
             "guideSteps": "",
             "apiKeyGuide": "",
             "latestVersion": __version__,
@@ -966,12 +1103,14 @@ async def api_remote_bootstrap() -> dict[str, Any]:
     out = {
         **local,
         "announcement": data.get("announcement") or "",
-        "disclaimer": data.get("disclaimer") or "",
+        "disclaimer": data.get("disclaimer") or DEFAULT_DISCLAIMER,
         "guideSteps": data.get("guideSteps") or data.get("guide_steps") or "",
         "apiKeyGuide": data.get("apiKeyGuide") or data.get("api_key_guide") or "",
         "latestVersion": data.get("latestVersion") or data.get("latest_version") or __version__,
         "downloadUrl": data.get("downloadUrl") or data.get("download_url") or "",
         "downloadSha256": data.get("downloadSha256") or data.get("download_sha256") or "",
+        "changelog": data.get("changelog") or "",
+        "forceUpdate": bool(data.get("forceUpdate") or data.get("force_update")),
         "projectId": data.get("projectId") or data.get("project_id") or cfg.get("license_project_id"),
         "projectName": data.get("projectName") or data.get("project_name") or "大帅网关",
         "maintenanceEnabled": bool(data.get("maintenanceEnabled") or data.get("maintenance_enabled")),

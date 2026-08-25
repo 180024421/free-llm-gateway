@@ -86,7 +86,7 @@ def remediation_hint(kind: str, err: str | None = None) -> str:
     if kind == "timeout" or "stall" in s or "truncated" in s:
         return "响应超时或被截断：写小说请优先豆包/混元；或降低单次输出长度。"
     if "invalid api key" in s or "local key" in s:
-        return "WorkBuddy 的 apiKey 与网关不一致：点「同步 WorkBuddy」后完全退出并重启 WorkBuddy。"
+        return "WorkBuddy 的 apiKey 与网关不一致：点「同步到本机客户端」后，在模型列表选「日常 · 大帅网关」（一般不用改设置）。"
     if "ep-" in s or "endpoint" in s or "接入点" in s:
         return "豆包需在「上游渠道」把模型 ID 换成控制台里的 ep-xxxx 接入点 ID。"
     return "检查上游 Key、网络/VPN，或在监控页查看最近失败原因。"

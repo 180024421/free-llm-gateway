@@ -12,6 +12,9 @@ datas = [
     (str(ROOT / "data" / "providers.example.json"), "data"),
     (str(ROOT / "data" / "routers.example.json"), "data"),
 ]
+_integrity = ROOT / "data" / "integrity.manifest.json"
+if _integrity.exists():
+    datas.append((str(_integrity), "data"))
 for name in (
     "workbuddy.models.example.json",
     "workbuddy-models.example.json",
@@ -32,6 +35,10 @@ hiddenimports = [
     "gateway.meta",
     "gateway.workbuddy",
     "gateway.ops",
+    "gateway.integrity",
+    "gateway.commercial",
+    "gateway.license",
+    "gateway.versioning",
     "uvicorn.logging",
     "uvicorn.loops",
     "uvicorn.loops.auto",

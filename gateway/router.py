@@ -116,17 +116,25 @@ def resolve_candidates(
             canon = next((m for m in models if str(m).lower() == upstream_model.lower()), upstream_model)
             h = STATE.get(p.get("name") or "?", canon)
             weight = float(p.get("weight") or 1)
+            try:
+                from .commercial import provider_region_boost
+
+                weight *= provider_region_boost(str(p.get("base_url") or ""), str(p.get("name") or ""))
+            except Exception:
+                pass
             score = h.score(weight)
+            # Prefer lower observed latency when scores are close.
+            lat = float(h.last_latency_ms or 99999)
             # Skip models in cooldown so 429/404 losers don't burn every request.
             if now < h.open_until:
                 continue
-            pairs.append((p, canon, score))
+            pairs.append((p, canon, score, lat))
 
     wanted_rank = {str(m).lower(): i for i, m in enumerate(wanted)}
-    pairs.sort(key=lambda t: (wanted_rank.get(str(t[1]).lower(), 999), -t[2]))
+    pairs.sort(key=lambda t: (wanted_rank.get(str(t[1]).lower(), 999), -t[2], t[3]))
     seen: set[tuple[str, str]] = set()
     ordered: list[tuple[dict[str, Any], str]] = []
-    for p, m, _ in pairs:
+    for p, m, *_rest in pairs:
         key = ((p.get("name") or ""), m)
         if key in seen:
             continue

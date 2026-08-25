@@ -128,8 +128,39 @@ def workbuddy_models_path() -> Path:
     return Path.home() / ".workbuddy" / "models.json"
 
 
+def codebuddy_models_path() -> Path:
+    """Legacy CodeBuddy product still reads ~/.codebuddy/models.json."""
+    return Path.home() / ".codebuddy" / "models.json"
+
+
 def workbuddy_app_config_path() -> Path:
     return Path.home() / ".workbuddy" / "app" / "app-config.json"
+
+
+def workbuddy_process_running() -> bool:
+    """True if WorkBuddy.exe (or workbuddy) is currently running."""
+    if os.name == "nt":
+        try:
+            import subprocess
+
+            r = subprocess.run(
+                ["tasklist", "/FI", "IMAGENAME eq WorkBuddy.exe", "/FO", "CSV", "/NH"],
+                capture_output=True,
+                text=True,
+                timeout=8,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            out = (r.stdout or "") + (r.stderr or "")
+            return "WorkBuddy.exe" in out
+        except Exception:
+            return False
+    try:
+        import subprocess
+
+        r = subprocess.run(["pgrep", "-fi", "workbuddy"], capture_output=True, text=True, timeout=8)
+        return bool((r.stdout or "").strip())
+    except Exception:
+        return False
 
 
 def _is_dashuai_entry(item: dict[str, Any]) -> bool:
@@ -176,6 +207,19 @@ def enable_agent_teams(enabled: bool | None = None) -> dict[str, Any]:
     if enabled is None:
         enabled = bool(load_config().get("workbuddy_enable_agent_teams", False))
     cfg["disableAgentTeams"] = not bool(enabled)
+    if path.exists():
+        try:
+            prev = json.loads(path.read_text(encoding="utf-8-sig"))
+            if isinstance(prev, dict) and prev.get("disableAgentTeams") == cfg["disableAgentTeams"]:
+                return {
+                    "ok": True,
+                    "path": str(path),
+                    "disableAgentTeams": cfg["disableAgentTeams"],
+                    "enabled": bool(enabled),
+                    "unchanged": True,
+                }
+        except Exception:
+            pass
     _atomic_write_json(path, cfg)
     return {
         "ok": True,
@@ -187,10 +231,33 @@ def enable_agent_teams(enabled: bool | None = None) -> dict[str, Any]:
 
 def _atomic_write_json(path: Path, data: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + f".tmp-{os.getpid()}")
     text = json.dumps(data, ensure_ascii=False, indent=2) + "\n"
+    tmp = path.with_suffix(path.suffix + f".tmp-{os.getpid()}")
     tmp.write_text(text, encoding="utf-8")
     tmp.replace(path)
+
+
+def _write_json_keep_watch(path: Path, data: Any) -> bool:
+    """Write JSON. Prefer in-place overwrite so WorkBuddy fs.watch keeps working."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    text = json.dumps(data, ensure_ascii=False, indent=2) + "\n"
+    if path.exists():
+        try:
+            if path.read_text(encoding="utf-8-sig") == text:
+                return False
+        except Exception:
+            pass
+        bak = path.with_suffix(path.suffix + ".bak")
+        try:
+            bak.write_bytes(path.read_bytes())
+        except Exception:
+            pass
+        path.write_text(text, encoding="utf-8")
+        return True
+    tmp = path.with_suffix(path.suffix + f".tmp-{os.getpid()}")
+    tmp.write_text(text, encoding="utf-8")
+    tmp.replace(path)
+    return True
 
 
 def build_workbuddy_models(cfg: dict[str, Any] | None = None, routers: dict[str, Any] | None = None) -> list[dict[str, Any]]:
@@ -292,6 +359,10 @@ def merge_workbuddy_models(ours: list[dict[str, Any]], existing: list[Any] | Non
     return list(ours) + kept
 
 
+def _write_models_file(path: Path, merged: list[dict[str, Any]]) -> bool:
+    return _write_json_keep_watch(path, merged)
+
+
 def sync_workbuddy(*, auto: bool = False) -> dict[str, Any]:
     cfg = load_config()
     routers = load_routers()
@@ -308,17 +379,28 @@ def sync_workbuddy(*, auto: bool = False) -> dict[str, Any]:
                 existing = raw
         except Exception:
             existing = []
-        bak = path.with_suffix(path.suffix + f".bak-{int(time.time())}")
-        try:
-            bak.write_bytes(path.read_bytes())
-        except Exception:
-            pass
 
     merged = merge_workbuddy_models(ours, existing)
-    _atomic_write_json(path, merged)
+    _write_models_file(path, merged)
+    # 仅当本机已有 CodeBuddy 目录时才写，避免凭空创建 ~/.codebuddy
+    try:
+        cb = codebuddy_models_path()
+        if cb.parent.is_dir():
+            _write_models_file(cb, merged)
+    except Exception:
+        pass
     teams = enable_agent_teams()
     port = int(cfg.get("port") or 8010)
     ready = [p.get("name") for p in providers if provider_is_ready(p)]
+    running = workbuddy_process_running()
+    ides: dict[str, Any] = {"ok": True, "auto_skipped": True, "targets": []}
+    if not auto:
+        try:
+            from .ide_sync import sync_ide_clients
+
+            ides = sync_ide_clients(cfg=cfg, routers=routers)
+        except Exception as exc:  # noqa: BLE001
+            ides = {"ok": False, "error": str(exc), "targets": []}
     return {
         "ok": True,
         "auto": auto,
@@ -329,6 +411,9 @@ def sync_workbuddy(*, auto: bool = False) -> dict[str, Any]:
         "base_url": f"http://127.0.0.1:{port}/v1",
         "api_key": cfg.get("local_api_key") or "sk-local-change-me",
         "providers_ready": ready,
+        "workbuddy_running": running,
+        "hot_reload": running,
+        "need_restart": False,
         "models": [
             {
                 "id": m["id"],
@@ -340,12 +425,13 @@ def sync_workbuddy(*, auto: bool = False) -> dict[str, Any]:
             for m in ours
         ],
         "agent_teams": teams,
+        "ides": ides,
         "hint": (
-            "\u5df2\u5199\u5165 WorkBuddy\uff1a\u65e5\u5e38/\u5feb\u901f/\u590d\u6742/\u5c0f\u8bf4/\u4ee3\u7801/\u8bc6\u56fe/\u7ffb\u8bd1/\u603b\u7ed3/\u63a8\u7406/\u957f\u6587/Agent \u00b7 \u5927\u5e05\u7f51\u5173\u3002"
-            "\u8bf7\u5b8c\u5168\u9000\u51fa\u5e76\u91cd\u542f WorkBuddy\u540e\u9009\u62e9\u4e0a\u8ff0\u6a21\u578b\u3002"
-            "\u7f51\u5173\u987b\u4fdd\u6301\u8fd0\u884c\uff08\u7aef\u53e3 "
+            "已写入 WorkBuddy 自定义模型（含 Base URL 与本地 Key），一般不用再改 WorkBuddy 设置。"
+            + (" WorkBuddy 正在运行，列表通常会自动刷新。" if running else " 下次打开 WorkBuddy 即可在模型列表看到「日常 · 大帅网关」。")
+            + " 网关须保持运行（端口 "
             + str(port)
-            + "\uff09\u3002"
+            + "）。"
         ),
     }
 
@@ -422,10 +508,10 @@ def diagnose_workbuddy() -> dict[str, Any]:
     ours = [m for m in (status.get("models") or []) if m.get("dashuai")]
     if not path.exists():
         issues.append("models.json 不存在")
-        tips.append("在面板点「同步 WorkBuddy」生成配置")
+        tips.append("在面板点「同步到本机客户端」生成配置")
     elif not ours:
         issues.append("未找到大帅网关模型条目")
-        tips.append("同步后完全退出并重启 WorkBuddy")
+        tips.append("同步后 WorkBuddy 会监视 models.json；若列表没出现，完全退出再开一次")
     else:
         key_ok = 0
         url_ok = 0
@@ -443,12 +529,12 @@ def diagnose_workbuddy() -> dict[str, Any]:
                 key_ok += 1
         if url_ok < len(ours):
             issues.append(f"仅 {url_ok}/{len(ours)} 条指向本机端口 {port}")
-            tips.append("重新同步 WorkBuddy，确认网关端口未改")
+            tips.append("重新同步到本机客户端，确认网关端口未改")
         if expected_key and key_ok < len(ours):
             issues.append(f"仅 {key_ok}/{len(ours)} 条 Key 与网关一致")
-            tips.append("保存本地 Key 后再同步，并重启 WorkBuddy")
+            tips.append("保存本地 Key 后再点一次同步（会自动写入客户端）")
         if not issues:
-            tips.append("配置看起来正常；若客户端仍失败，请完全退出 WorkBuddy 再开")
+            tips.append("配置看起来正常。WorkBuddy 会监视 models.json，一般不用改设置；列表没刷新时完全退出再开一次即可。")
     return {
         "ok": not issues,
         "path": str(path),

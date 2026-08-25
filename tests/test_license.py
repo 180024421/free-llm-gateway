@@ -4,6 +4,7 @@ import gateway.license as lic
 
 
 def test_license_required_defaults_off_without_base(monkeypatch):
+    monkeypatch.setattr(lic, "is_commercial_build", lambda cfg=None: False)
     monkeypatch.setattr(lic, "load_config", lambda: {"require_license": False})
     assert lic.license_required() is False
     monkeypatch.setattr(lic, "load_config", lambda: {"license_api_base": "", "require_license": None})
@@ -17,6 +18,11 @@ def test_session_signature_tamper(tmp_path, monkeypatch):
 
     monkeypatch.setattr(cfg_mod, "DATA_DIR", tmp_path)
     monkeypatch.setattr(lic, "device_fingerprint", lambda: "devfinger")
+    monkeypatch.setattr(lic, "is_commercial_build", lambda cfg=None: False)
+    monkeypatch.setenv("DASHUAI_COMMERCIAL", "0")
+    # Avoid DPAPI dependency in unit tests
+    monkeypatch.setattr("gateway.secrets.session_encryption_enabled", lambda cfg=None: False)
+    monkeypatch.setattr("gateway.secrets.encryption_enabled", lambda cfg=None: False)
     lic.save_session(
         {
             "token": "t",

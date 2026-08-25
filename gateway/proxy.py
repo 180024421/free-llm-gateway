@@ -13,36 +13,47 @@ from .state import STATE
 
 USAGE_PATH = DATA_DIR / "usage.jsonl"
 
-_client: httpx.AsyncClient | None = None
-_client_timeout: float | None = None
+# Keep separate keepalive pools by timeout bucket so chat/tool/novel don't
+# thrash a single client (recreate was killing connection reuse → slower TTFT).
+_clients: dict[int, httpx.AsyncClient] = {}
+
+
+def _timeout_bucket(timeout_sec: float) -> int:
+    t = max(5, int(timeout_sec or 30))
+    # 15 / 30 / 60 / 120 / 180 / 360 …
+    for edge in (15, 30, 60, 120, 180, 240, 360, 600):
+        if t <= edge:
+            return edge
+    return 600
 
 
 def get_http_client(timeout_sec: float) -> httpx.AsyncClient:
-    global _client, _client_timeout
-    # Recreate when timeout profile changes a lot (chat vs tool/agent).
-    if (
-        _client is None
-        or _client.is_closed
-        or _client_timeout is None
-        or abs(_client_timeout - timeout_sec) > 5
-    ):
-        connect = min(10.0, max(3.0, timeout_sec / 3))
-        _client = httpx.AsyncClient(
-            timeout=httpx.Timeout(timeout_sec, connect=connect, pool=connect),
-            follow_redirects=True,
-            limits=httpx.Limits(max_connections=40, max_keepalive_connections=20),
-            trust_env=True,
-        )
-        _client_timeout = timeout_sec
-    return _client
+    bucket = _timeout_bucket(timeout_sec)
+    client = _clients.get(bucket)
+    if client is not None and not client.is_closed:
+        return client
+    # Short connect: fail over dead VPN/peers fast; read uses full timeout.
+    connect = 2.5 if bucket <= 30 else min(8.0, max(3.0, bucket / 20))
+    client = httpx.AsyncClient(
+        timeout=httpx.Timeout(float(bucket), connect=connect, pool=connect, write=30.0),
+        follow_redirects=True,
+        limits=httpx.Limits(max_connections=64, max_keepalive_connections=32),
+        http2=False,
+        trust_env=True,
+    )
+    _clients[bucket] = client
+    return client
 
 
 async def aclose_http_client() -> None:
-    global _client, _client_timeout
-    if _client is not None and not _client.is_closed:
-        await _client.aclose()
-    _client = None
-    _client_timeout = None
+    global _clients
+    for client in list(_clients.values()):
+        if client is not None and not client.is_closed:
+            try:
+                await client.aclose()
+            except Exception:
+                pass
+    _clients = {}
 
 
 def _estimate_usage(content_chars: int, *, prompt_tokens: int = 0) -> dict[str, Any]:
@@ -547,6 +558,17 @@ def is_fast_route(client_model: str) -> bool:
     }
 
 
+def is_daily_route(client_model: str) -> bool:
+    raw = (client_model or "").strip()
+    m = raw.lower()
+    return raw in {"日常", "daily"} or m in {"daily", "default", "auto"}
+
+
+def is_snappy_route(client_model: str) -> bool:
+    """Routes that should race candidates and prefer low-latency models."""
+    return is_fast_route(client_model) or is_daily_route(client_model)
+
+
 def is_complex_route(client_model: str) -> bool:
     raw = (client_model or "").strip()
     m = raw.lower()
@@ -566,8 +588,8 @@ def is_coding_route(client_model: str) -> bool:
 
 
 def prefer_low_reasoning(body: dict[str, Any], client_model: str) -> dict[str, Any]:
-    """For fast routes: downgrade deep-thinking flags WorkBuddy may send."""
-    if not is_fast_route(client_model):
+    """For snappy routes: downgrade deep-thinking flags WorkBuddy may send."""
+    if not is_snappy_route(client_model):
         return body
     out = dict(body)
     for k in ("reasoning_effort", "reasoningEffort"):
@@ -706,7 +728,7 @@ def _sanitize_payload(
     wants_qwen_think_ctrl = ("qwen" in low) or ("thinking" in low)
     if (is_complex_route(client_model) or is_novel_route(client_model)) and "thinking" in low:
         payload["enable_thinking"] = True
-    elif wants_qwen_think_ctrl and (is_fast_route(client_model) or not has_tools):
+    elif wants_qwen_think_ctrl and (is_snappy_route(client_model) or not has_tools):
         payload["enable_thinking"] = False
     else:
         payload.pop("enable_thinking", None)
@@ -852,7 +874,9 @@ async def forward_chat(
             # on a dead upstream. Daily tool turns keep longer / skip hard fail.
             do_peek = ((not has_tools) or fast) and not buffer_complete
             peek_budget = stall_sec if not has_tools else min(stall_sec, 12.0 if fast else stall_sec)
-            deadline = time.time() + max(2.0, peek_budget)
+            # Fail dead peers faster; first usable chunk still returns immediately.
+            min_wait = 1.0 if is_snappy_route(client_model) else 2.0
+            deadline = time.time() + max(min_wait, peek_budget)
 
             async def _fail_stream(err: str, *, cooldown: float = 45.0) -> tuple[None, None, dict[str, Any]]:
                 await resp.aclose()

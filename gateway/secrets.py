@@ -127,3 +127,45 @@ def reveal_providers(providers: list[dict[str, Any]], cfg: dict[str, Any] | None
         row["api_key"] = decrypt_secret(str(row.get("api_key") or ""), cfg=cfg)
         out.append(row)
     return out
+
+
+def session_encryption_enabled(cfg: dict[str, Any] | None = None) -> bool:
+    if cfg is None:
+        from .config import load_config
+
+        cfg = load_config()
+    if cfg.get("encrypt_session") is False:
+        return False
+    if cfg.get("encrypt_session") is True:
+        return True
+    try:
+        from .commercial import is_commercial_build
+
+        return is_commercial_build(cfg)
+    except Exception:
+        return sys.platform.startswith("win")
+
+
+def seal_session_secrets(data: dict[str, Any], *, cfg: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Encrypt token fields at rest (Windows DPAPI when enabled)."""
+    out = dict(data)
+    if not session_encryption_enabled(cfg):
+        return out
+    for key in ("token", "refresh_token"):
+        val = out.get(key)
+        if isinstance(val, str) and val.strip() and not val.startswith(_ENC_PREFIX):
+            out[key] = encrypt_secret(val, cfg=cfg)
+    return out
+
+
+def open_session_secrets(data: dict[str, Any], *, cfg: dict[str, Any] | None = None) -> dict[str, Any]:
+    out = dict(data)
+    for key in ("token", "refresh_token"):
+        val = out.get(key)
+        if isinstance(val, str) and val.startswith(_ENC_PREFIX):
+            plain = decrypt_secret(val, cfg=cfg)
+            if plain:
+                out[key] = plain
+            else:
+                out[key] = ""
+    return out

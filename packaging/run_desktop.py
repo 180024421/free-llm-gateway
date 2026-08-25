@@ -137,7 +137,7 @@ def _msgbox(title: str, text: str, error: bool = True) -> None:
 
 
 def _merge_license_defaults(data_dir: Path, bundled_example: Path) -> None:
-    """Fill missing license_* keys into existing config.json (do not overwrite user values)."""
+    """Ensure commercial EXE always requires license + HTTPS license API."""
     target = data_dir / "config.json"
     if not target.exists() or not bundled_example.exists():
         return
@@ -148,15 +148,62 @@ def _merge_license_defaults(data_dir: Path, bundled_example: Path) -> None:
         return
     if not isinstance(cfg, dict) or not isinstance(example, dict):
         return
-    keys = ("license_api_base", "license_project_id", "require_license")
     changed = False
-    for k in keys:
+    # Fill missing keys from example first.
+    for k in ("license_api_base", "license_project_id", "require_license"):
         if k not in cfg and k in example:
             cfg[k] = example[k]
             changed = True
+    # Frozen commercial build: never allow require_license=false.
+    if getattr(sys, "frozen", False) or os.environ.get("DASHUAI_COMMERCIAL", "").strip() in {"1", "true", "yes"}:
+        if cfg.get("require_license") is not True:
+            cfg["require_license"] = True
+            changed = True
+        cfg["commercial_mode"] = True
+        cfg.setdefault("license_online_cache_sec", 600)
+        cfg.setdefault("license_offline_grace_sec", 7200)
+        cfg.setdefault("license_reserve_tokens", 128)
+        cfg.setdefault("encrypt_session", True)
+        cfg.setdefault("bill_estimated_usage", True)
+        base = str(cfg.get("license_api_base") or "").strip()
+        try:
+            from gateway.commercial import migrate_public_license_base
+
+            migrated = migrate_public_license_base(base)
+            if migrated and migrated != base:
+                cfg["license_api_base"] = migrated
+                base = migrated
+                changed = True
+                if "1ph1hf8043323.vicp.fun" in migrated:
+                    cfg["license_allow_insecure_http"] = False
+        except Exception:
+            pass
+        # 仅在未显式允许明文 HTTP 时，才把公网 http 升到 https
+        allow_http = bool(cfg.get("license_allow_insecure_http"))
+        if base.lower().startswith("http://") and not allow_http:
+            from urllib.parse import urlparse, urlunparse
+
+            p = urlparse(base)
+            host = (p.hostname or "").lower()
+            if host not in {"127.0.0.1", "localhost", "::1"}:
+                cfg["license_api_base"] = urlunparse(("https", p.netloc, p.path, p.params, p.query, p.fragment))
+                changed = True
+        # 允许明文时：仅裸 IP/本机可降为 http；域名（花生壳）保持 https
+        if allow_http and base.lower().startswith("https://"):
+            from urllib.parse import urlparse, urlunparse
+
+            p = urlparse(base)
+            host = (p.hostname or "").lower()
+            is_ip = bool(host) and host.replace(".", "").isdigit()
+            if host in {"127.0.0.1", "localhost", "::1"} or is_ip:
+                cfg["license_api_base"] = urlunparse(("http", p.netloc, p.path, p.params, p.query, p.fragment))
+                changed = True
+        if not changed:
+            changed = True  # still persist commercial_mode defaults set above
+        changed = True
     if changed:
         target.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        _log(f"merged license defaults into {target}")
+        _log(f"merged/enforced license defaults into {target}")
 
 
 def _providers_have_real_keys(path: Path) -> bool:
@@ -308,6 +355,22 @@ def main() -> None:
     root = _bundle_root()
     _prepare_env(root)
     _log(f"start frozen={getattr(sys, 'frozen', False)} root={root}")
+
+    try:
+        from gateway.integrity import PRODUCT_WATERMARK, soft_anti_debug, verify_critical_files
+
+        ok, reason = verify_critical_files()
+        if not ok:
+            _log(f"integrity fail: {reason}")
+            _msgbox("大帅网关", "程序文件校验失败，可能已被篡改。请重新下载官方安装包。")
+            sys.exit(2)
+        if soft_anti_debug() and getattr(sys, "frozen", False):
+            _log("debugger detected")
+            _msgbox("大帅网关", "检测到调试环境，商业版已拒绝启动。")
+            sys.exit(3)
+        _log(PRODUCT_WATERMARK)
+    except Exception as e:
+        _log(f"integrity skip: {e}")
 
     import gateway.config as cfg_mod
     from gateway import __product__, __version__

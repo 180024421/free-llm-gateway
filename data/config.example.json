@@ -12,19 +12,23 @@
 
   "health_probe_interval_sec": 60,
 
-  "stream_stall_sec": 8,
+  "stream_stall_sec": 6,
 
   "tool_request_timeout_sec": 180,
 
   "tool_stream_stall_sec": 20,
 
-  "fast_stream_stall_sec": 5,
+  "fast_stream_stall_sec": 4,
 
   "fast_tool_stream_stall_sec": 8,
 
   "fast_tool_request_timeout_sec": 60,
 
-  "fast_request_timeout_sec": 20,
+  "fast_request_timeout_sec": 18,
+
+  "daily_stream_stall_sec": 5,
+
+  "daily_request_timeout_sec": 25,
 
   "fast_max_retries": 3,
 
@@ -75,11 +79,25 @@
 
   "code_max_retries": 4,
 
-  "license_api_base": "http://111.229.202.251/api",
+  "license_api_base": "https://1ph1hf8043323.vicp.fun/api",
 
   "license_project_id": 4,
 
-  "require_license": true
+  "require_license": true,
+
+  "commercial_mode": false,
+
+  "license_allow_insecure_http": false,
+
+  "encrypt_session": true,
+
+  "license_online_cache_sec": 600,
+
+  "license_offline_grace_sec": 7200,
+
+  "license_reserve_tokens": 128,
+
+  "bill_estimated_usage": true
 
 }
 

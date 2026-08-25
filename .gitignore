@@ -10,6 +10,9 @@ data/providers.json
 data/routers.json
 data/usage.jsonl
 data/history.jsonl
+data/session.json
+data/.license_hmac
+data/channel_health.json
 data/*.bak
 data/_import_*.json
 .idea/
@@ -35,6 +38,7 @@ clients/idea/build/
 .pytest_cache/
 
 scripts/_tmp_*
+scripts/_ui_check.js
 scripts/_asar_scan_out.txt
 scripts/_teams_out.txt
 packaging/_ui_bundle.html

@@ -44,3 +44,21 @@ Name: "{group}\卸载 {#MyAppName}"; Filename: "{uninstallexe}"
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "启动大帅网关"; Flags: nowait postinstall skipifsilent
+
+[Code]
+function InitializeSetup(): Boolean;
+begin
+  Result := True;
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+begin
+  if CurStep = ssPostInstall then
+  begin
+    // Reminder is also in 发给别人-使用说明.md copied beside the EXE.
+  end;
+end;
+
+[UninstallDelete]
+; Keep user data by default. Users can delete {app}\data manually for a full wipe.
+Type: filesandordirs; Name: "{app}\data\*.bak"

@@ -64,7 +64,12 @@ def test_chat_without_providers_returns_503(monkeypatch):
     async def _ok():
         return {"valid": True, "bypassed": True}
 
+    async def _no_reserve():
+        return 0
+
     monkeypatch.setattr(app_mod, "require_entitlement", _ok)
+    monkeypatch.setattr(app_mod, "reserve_quota", _no_reserve)
+    monkeypatch.setattr(app_mod, "release_quota", lambda *a, **k: None)
     monkeypatch.setattr(app_mod, "reload_all", lambda: (
         {"local_api_key": "sk-test-auth", "request_timeout_sec": 30, "max_retries_per_request": 2},
         [],
@@ -74,6 +79,7 @@ def test_chat_without_providers_returns_503(monkeypatch):
         "local_api_key": "sk-test-auth",
         "request_timeout_sec": 30,
         "max_retries_per_request": 2,
+        "require_license": False,
     })
     r = client.post(
         "/v1/chat/completions",

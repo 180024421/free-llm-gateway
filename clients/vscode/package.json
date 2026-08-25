@@ -35,6 +35,10 @@
         "title": "大帅网关: 切换用途路由"
       },
       {
+        "command": "dashuai.showLicense",
+        "title": "大帅网关: 查看授权状态"
+      },
+      {
         "command": "dashuai.applyCursorHint",
         "title": "大帅网关: 显示 Cursor / Continue 接入说明"
       }

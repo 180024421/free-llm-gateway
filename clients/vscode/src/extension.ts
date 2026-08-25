@@ -120,6 +120,29 @@ class ChatViewProvider implements vscode.WebviewViewProvider {
   }
 }
 
+async function fetchLicenseStatus(): Promise<string> {
+  const c = cfg();
+  const root = c.baseUrl.replace(/\/v1\/?$/, "");
+  const headers: Record<string, string> = { Accept: "application/json" };
+  if (c.apiKey) headers.Authorization = `Bearer ${c.apiKey}`;
+  const r = await fetch(`${root}/api/license/status?refresh=1`, { headers });
+  const j: any = await r.json().catch(() => ({}));
+  if (!r.ok) {
+    throw new Error(j?.detail?.message || j?.message || `HTTP ${r.status}`);
+  }
+  if (!j.logged_in) return "大帅授权: 未登录（请打开桌面端登录激活）";
+  if (j.frozen) return "大帅授权: 已冻结";
+  if (!j.valid) return `大帅授权: ${j.message || "无效"}`;
+  const parts: string[] = ["大帅授权"];
+  if (j.plan_label) parts.push(String(j.plan_label));
+  if (j.token_unlimited) parts.push("Token不限");
+  else if (j.token_remaining != null) parts.push(`剩余${j.token_remaining}`);
+  if (j.time_unlimited) parts.push("不限时");
+  else if (j.expire_at) parts.push(`至${String(j.expire_at).slice(0, 10)}`);
+  if (j.low_balance) parts.push("余量不足");
+  return parts.join(" · ");
+}
+
 async function chatOnce(prompt: string): Promise<string> {
   const c = cfg();
   if (c.stream) {
@@ -234,6 +257,36 @@ export function activate(context: vscode.ExtensionContext) {
       vscode.window.showInformationMessage(`已切换模型：${pick.id}`);
     })
   );
+  context.subscriptions.push(
+    vscode.commands.registerCommand("dashuai.showLicense", async () => {
+      try {
+        const text = await fetchLicenseStatus();
+        vscode.window.showInformationMessage(text);
+      } catch (e: any) {
+        vscode.window.showErrorMessage(`授权查询失败：${e?.message || e}`);
+      }
+    })
+  );
+
+  const licenseBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 80);
+  licenseBar.command = "dashuai.showLicense";
+  licenseBar.text = "大帅授权: …";
+  licenseBar.tooltip = "点击查看网关授权状态（与桌面端同一账号权益）";
+  licenseBar.show();
+  context.subscriptions.push(licenseBar);
+  const refreshLicense = async () => {
+    try {
+      const text = await fetchLicenseStatus();
+      licenseBar.text = text.length > 28 ? text.slice(0, 28) + "…" : text;
+      licenseBar.tooltip = text;
+    } catch {
+      licenseBar.text = "大帅授权: 未连接";
+    }
+  };
+  void refreshLicense();
+  const timer = setInterval(() => void refreshLicense(), 60000);
+  context.subscriptions.push({ dispose: () => clearInterval(timer) });
+
   context.subscriptions.push(
     vscode.commands.registerCommand("dashuai.applyCursorHint", () => {
       const c = cfg();
