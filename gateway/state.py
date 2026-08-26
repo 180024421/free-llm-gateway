@@ -64,6 +64,9 @@ class ChannelHealth:
             pass
 
 
+PROVIDER_SENTINEL = "*"
+
+
 @dataclass
 class RuntimeState:
     lock: threading.RLock = field(default_factory=threading.RLock)
@@ -78,6 +81,46 @@ class RuntimeState:
             if k not in self.health:
                 self.health[k] = ChannelHealth()
             return self.health[k]
+
+    def provider_quarantined_until(self, provider: str) -> float:
+        """Return open_until for whole-provider quarantine (0 if none)."""
+        with self.lock:
+            ch = self.health.get(self.key(provider, PROVIDER_SENTINEL))
+            if not ch:
+                return 0.0
+            return float(ch.open_until or 0.0)
+
+    def quarantine_provider(self, provider: str, *, error: str, cooldown_sec: float) -> None:
+        """Isolate an entire upstream account after balance/quota exhaustion.
+
+        Subsequent resolve_candidates skips this provider so traffic auto-fails
+        over to other keys without waiting on each model sequentially.
+        """
+        pname = (provider or "").strip() or "?"
+        until = time.time() + max(60.0, float(cooldown_sec))
+        err = (error or "provider exhausted")[:500]
+        with self.lock:
+            sentinel = self.get(pname, PROVIDER_SENTINEL)
+            sentinel.failures += 1
+            sentinel.consecutive_failures += 1
+            sentinel.last_error = err
+            sentinel.last_fail_at = time.time()
+            sentinel.open_until = max(float(sentinel.open_until or 0.0), until)
+            prefix = f"{pname}::"
+            for k, h in self.health.items():
+                if k == self.key(pname, PROVIDER_SENTINEL):
+                    continue
+                if not k.startswith(prefix):
+                    continue
+                h.last_error = err
+                h.last_fail_at = time.time()
+                h.open_until = max(float(h.open_until or 0.0), until)
+        try:
+            from .channel_store import schedule_save
+
+            schedule_save(STATE)
+        except Exception:
+            pass
 
     def snapshot(self) -> list[dict[str, Any]]:
         with self.lock:
@@ -111,6 +154,7 @@ class RuntimeState:
                         "open_until": getattr(h, "open_until", 0.0),
                         "error_kind": kind if err else ("cooldown" if remain > 0 else "ok"),
                         "score": round(h.score(), 4),
+                        "provider_quarantine": model == PROVIDER_SENTINEL and remain > 0,
                     }
                 )
             return out

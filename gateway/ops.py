@@ -32,10 +32,28 @@ def is_loopback_host(host: str | None) -> bool:
     return h in {"127.0.0.1", "::1", "localhost"}
 
 
+def is_balance_exhausted(err: str | None) -> bool:
+    """True when upstream reports account/quota exhaustion (not transient rate limit)."""
+    s = (err or "").lower()
+    if not s:
+        return False
+    if "insufficient balance" in s or "余额不足" in s or "欠费" in s:
+        return True
+    if "billing" in s and ("exceed" in s or "insufficient" in s or "欠" in s):
+        return True
+    # ModelScope / similar: 429 body often says insufficient balance
+    if "balance" in s and ("insufficient" in s or "not enough" in s or "耗尽" in s):
+        return True
+    return False
+
+
 def classify_error(err: str | None) -> str:
     s = (err or "").lower()
     if not s:
         return "unknown"
+    # Balance before generic 429 — "insufficient balance" often rides on HTTP 429.
+    if is_balance_exhausted(s):
+        return "balance"
     if "429" in s or "rate" in s or "quota" in s or "限流" in s:
         return "rate_limit"
     if "401" in s or "403" in s or "unauthorized" in s or "invalid api" in s:
@@ -77,12 +95,12 @@ def recent_failures(limit: int = 20) -> list[dict[str, Any]]:
 
 def remediation_hint(kind: str, err: str | None = None) -> str:
     s = (err or "").lower()
+    if kind == "balance" or is_balance_exhausted(s):
+        return "该上游账户额度已用尽：网关会自动换其它渠道；也可充值该平台或粘贴新 Key。"
     if kind == "rate_limit" or "429" in s:
-        return "上游限流：可换「快速」路由，或在设置里把「小说首选」改为豆包/混元。"
+        return "上游限流：网关会自动换路；也可稍后重试或换「快速」路由。"
     if kind == "auth" or "401" in s or "403" in s:
         return "API Key 无效或过期：到「上游渠道」重新粘贴 Key 并保存。"
-    if kind == "balance" or "余额" in s or "billing" in s:
-        return "上游账户余额不足：充值或换免费渠道（魔搭/硅基/NVIDIA）。"
     if kind == "timeout" or "stall" in s or "truncated" in s:
         return "响应超时或被截断：写小说请优先豆包/混元；或降低单次输出长度。"
     if "invalid api key" in s or "local key" in s:

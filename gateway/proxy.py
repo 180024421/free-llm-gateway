@@ -817,14 +817,38 @@ def _sanitize_payload(
 
 
 def _fail_cooldown_sec(status_code: int, err_text: str) -> float:
+    from .ops import is_balance_exhausted
+
     low = (err_text or "").lower()
+    # Account exhausted: long quarantine so other providers take over automatically.
+    if is_balance_exhausted(low) or (
+        ("balance" in low or "余额" in low or "欠费" in low) and status_code in (402, 403, 429)
+    ):
+        return 21600.0  # 6h — free tiers rarely refill sooner
     if status_code == 429 or "rate" in low or "限流" in low or "quota" in low:
         return 120.0
     if status_code in (404, 410):
         return 3600.0
     if "balance" in low or "insufficient" in low or "余额" in low or "欠费" in low:
-        return 300.0
+        return 7200.0
     return 45.0
+
+
+def _note_upstream_fail(provider: str, model: str, error: str, cooldown_sec: float) -> None:
+    """Mark model fail; on balance exhaustion, quarantine whole provider for auto-failover."""
+    from .ops import is_balance_exhausted
+    from .state import STATE
+
+    if is_balance_exhausted(error):
+        # Fixed long window (no exponential blow-up) + skip entire account next time.
+        ch = STATE.get(provider, model)
+        ch.failures += 1
+        ch.consecutive_failures += 1
+        ch.last_error = (error or "")[:500]
+        ch.last_fail_at = time.time()
+        STATE.quarantine_provider(provider, error=error, cooldown_sec=cooldown_sec)
+        return
+    STATE.get(provider, model).mark_fail(error, cooldown_sec=cooldown_sec)
 
 
 async def forward_chat(
@@ -885,10 +909,12 @@ async def forward_chat(
             if resp.status_code >= 400:
                 err_body = (await resp.aread()).decode("utf-8", errors="replace")
                 await resp.aclose()
-                low_err = err_body.lower()
                 cd = _fail_cooldown_sec(resp.status_code, err_body)
-                STATE.get(name, upstream_model).mark_fail(
-                    f"HTTP {resp.status_code}: {err_body[:300]}", cooldown_sec=cd
+                _note_upstream_fail(
+                    name,
+                    upstream_model,
+                    f"HTTP {resp.status_code}: {err_body[:300]}",
+                    cd,
                 )
                 meta["error"] = err_body
                 meta["status_code"] = resp.status_code
@@ -940,7 +966,7 @@ async def forward_chat(
                         await pump_task
                     except Exception:
                         pass
-                STATE.get(name, upstream_model).mark_fail(err, cooldown_sec=cooldown)
+                _note_upstream_fail(name, upstream_model, err, cooldown)
                 meta["error"] = err
                 meta["status_code"] = 200
                 _append_usage(
@@ -1116,9 +1142,11 @@ async def forward_chat(
         meta["status_code"] = resp.status_code
         if resp.status_code >= 400:
             err_text = resp.text[:300]
-            STATE.get(name, upstream_model).mark_fail(
+            _note_upstream_fail(
+                name,
+                upstream_model,
                 f"HTTP {resp.status_code}: {err_text}",
-                cooldown_sec=_fail_cooldown_sec(resp.status_code, resp.text),
+                _fail_cooldown_sec(resp.status_code, resp.text),
             )
             meta["error"] = resp.text
             return None, None, meta
@@ -1132,7 +1160,7 @@ async def forward_chat(
             data = None
 
         if isinstance(data, dict) and not payload_has_usable_text(data):
-            STATE.get(name, upstream_model).mark_fail("empty assistant content", cooldown_sec=45.0)
+            _note_upstream_fail(name, upstream_model, "empty assistant content", 45.0)
             meta["error"] = "empty assistant content"
             meta["_raw"] = data
             return None, None, meta
@@ -1167,7 +1195,7 @@ async def forward_chat(
             pass
         raise
     except Exception as e:
-        STATE.get(name, upstream_model).mark_fail(str(e))
+        _note_upstream_fail(name, upstream_model, str(e), 45.0)
         meta["error"] = str(e)
         return None, None, meta
 

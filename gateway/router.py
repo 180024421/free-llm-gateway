@@ -98,6 +98,8 @@ def resolve_candidates(
     routers: dict[str, Any],
 ) -> list[tuple[dict[str, Any], str]]:
     """Return ordered (provider, upstream_model) candidates."""
+    from .ops import is_balance_exhausted
+
     wanted = [apply_alias(m) for m in _route_candidates(model, routers)]
 
     def model_in(models: list[Any], name: str) -> bool:
@@ -106,20 +108,28 @@ def resolve_candidates(
         lower = name.lower()
         return any(str(m).lower() == lower for m in models)
 
-    pairs: list[tuple[dict[str, Any], str, float]] = []
     now = time.time()
+
+    def provider_blocked(pname: str) -> bool:
+        until = STATE.provider_quarantined_until(pname)
+        return bool(until and now < until)
+
+    pairs: list[tuple[dict[str, Any], str, float]] = []
     for upstream_model in wanted:
         for p in _enabled_providers(providers):
+            pname = str(p.get("name") or "?")
+            if provider_blocked(pname):
+                continue
             models = _active_models(p)
             if not model_in(models, upstream_model):
                 continue
             canon = next((m for m in models if str(m).lower() == upstream_model.lower()), upstream_model)
-            h = STATE.get(p.get("name") or "?", canon)
+            h = STATE.get(pname, canon)
             weight = float(p.get("weight") or 1)
             try:
                 from .commercial import provider_region_boost
 
-                weight *= provider_region_boost(str(p.get("base_url") or ""), str(p.get("name") or ""))
+                weight *= provider_region_boost(str(p.get("base_url") or ""), pname)
             except Exception:
                 pass
             score = h.score(weight)
@@ -141,14 +151,21 @@ def resolve_candidates(
         seen.add(key)
         ordered.append((p, m))
     # Last resort: if every candidate is cooling down, retry cooled list by route order.
+    # Never hard-retry balance-quarantined providers — that burns the client timeout.
     if not ordered:
         for upstream_model in wanted:
             for p in _enabled_providers(providers):
+                pname = str(p.get("name") or "?")
+                if provider_blocked(pname):
+                    continue
                 models = _active_models(p)
                 if not model_in(models, upstream_model):
                     continue
                 canon = next((m for m in models if str(m).lower() == upstream_model.lower()), upstream_model)
-                key = ((p.get("name") or ""), canon)
+                h = STATE.get(pname, canon)
+                if is_balance_exhausted(h.last_error) and now < float(h.open_until or 0):
+                    continue
+                key = (pname, canon)
                 if key in seen:
                     continue
                 seen.add(key)
