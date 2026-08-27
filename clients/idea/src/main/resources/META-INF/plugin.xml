@@ -3,7 +3,7 @@
   <name>大帅网关</name>
   <vendor email="dashuai@local">Dashuai</vendor>
   <description><![CDATA[
-    大帅网关 IDEA 插件：一键打开本机网关控制台，并提供 OpenAI 兼容接入说明。
+    大帅网关 IDEA 插件：一键打开本机网关控制台，侧边栏问答，并提供 OpenAI 兼容接入说明。
   ]]></description>
   <depends>com.intellij.modules.platform</depends>
   <actions>
@@ -27,5 +27,9 @@
         instance="com.dashuai.gateway.DashuaiConfigurable"
         id="com.dashuai.gateway.settings"
         displayName="大帅网关"/>
+    <toolWindow id="大帅问答"
+                anchor="right"
+                factoryClass="com.dashuai.gateway.ChatToolWindowFactory"
+                secondary="false"/>
   </extensions>
 </idea-plugin>

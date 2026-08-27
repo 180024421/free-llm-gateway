@@ -216,15 +216,52 @@ function currentLocalKeyFromUi(){
   return fromInput || String(state.localKey || localStorage.getItem("dashuai_local_key") || "").trim();
 }
 
-function showWbWizard(wbPath){
+function showWbWizard(wbPath, restartApps){
   const modal = $("#wbWizardModal");
   const pathEl = $("#wbWizardPath");
   if (pathEl) pathEl.textContent = "路径：" + (wbPath || "~/.workbuddy/models.json");
+  const box = $("#restartHintBox");
+  const list = $("#restartHintList");
+  const apps = Array.isArray(restartApps) ? restartApps.filter(Boolean) : [];
+  if (box && list) {
+    if (apps.length) {
+      box.style.display = "";
+      list.innerHTML = apps.map(a => `<li>${esc(a)}</li>`).join("");
+    } else {
+      box.style.display = "none";
+      list.innerHTML = "";
+    }
+  }
   if (modal) modal.classList.add("show");
 }
 function hideWbWizard(){
   const modal = $("#wbWizardModal");
   if (modal) modal.classList.remove("show");
+}
+function collectRestartApps(j){
+  if (!j || typeof j !== "object") return [];
+  const apps = [];
+  const named = j.need_restart_apps || j.restart_apps;
+  if (Array.isArray(named)) {
+    named.forEach(a => { if (a && !apps.includes(a)) apps.push(String(a)); });
+  }
+  const labels = { workbuddy: "WorkBuddy", cursor: "Cursor", vscode: "VS Code", code: "VS Code", idea: "IDEA", continue: "Continue" };
+  if (j.need_restart && !apps.includes("WorkBuddy")) apps.push("WorkBuddy");
+  else if (j.hot_reload === false && !apps.includes("WorkBuddy")) apps.push("WorkBuddy");
+  const ides = (j.ides && j.ides.targets) || [];
+  ides.forEach(t => {
+    if (!t || !t.ok || t.skipped || t.unchanged) return;
+    if (t.need_restart === false) return;
+    const prod = String(t.product || "").toLowerCase();
+    const label = labels[prod] || t.product;
+    if (label && !apps.includes(label)) apps.push(label);
+  });
+  return apps;
+}
+function showRestartHints(j){
+  const apps = collectRestartApps(j);
+  if (!apps.length) return;
+  showWbWizard((j && (j.path || (j.diagnose && j.diagnose.path))) || "", apps);
 }
 if ($("#btnWbWizardDone")) $("#btnWbWizardDone").onclick = () => hideWbWizard();
 if ($("#btnWbWizardOpen")) $("#btnWbWizardOpen").onclick = () => {
@@ -232,6 +269,111 @@ if ($("#btnWbWizardOpen")) $("#btnWbWizardOpen").onclick = () => {
     toast("请手动打开：" + (j.path || "~/.workbuddy/models.json"));
   }).catch(() => toast("路径：%USERPROFILE%\\.workbuddy\\models.json"));
 };
+
+async function runHealthWizard(){
+  const modal = $("#healthWizardModal");
+  const body = $("#healthWizardBody");
+  const fixes = $("#healthWizardFixes");
+  if (modal) modal.classList.add("show");
+  const setStep = (n, cls) => {
+    $$("#healthWizardSteps .wstep").forEach(el => {
+      const w = Number(el.dataset.hw || 0);
+      el.classList.remove("done", "cur");
+      if (w < n) el.classList.add("done");
+      else if (w === n) el.classList.add(cls || "cur");
+    });
+  };
+  const lines = [];
+  const push = (html) => { lines.push(html); if (body) body.innerHTML = lines.join(""); };
+  if (fixes) fixes.innerHTML = "";
+  if (body) body.innerHTML = "<div class='empty'>开始体检…</div>";
+
+  let lic = null, check = null, diag = null;
+  try {
+    setStep(1);
+    push("<div>① 检查授权…</div>");
+    const lr = await fetch("/api/license/status?refresh=1");
+    lic = await lr.json().catch(() => ({}));
+    const licOk = !!(lic && (lic.valid || lic.require_license === false));
+    push(`<div>${licOk ? "✅" : "⚠️"} 授权：${esc(lic.message || (lic.valid ? "有效" : "未激活"))}` +
+      (lic.token_remaining != null && !lic.token_unlimited ? ` · 剩余 Token ${fmtNum(lic.token_remaining)}` : "") +
+      (lic.pending_usage_count > 0 ? ` · 待上报 ${lic.pending_usage_count}` : "") +
+      `</div>`);
+    setStep(1, "done");
+
+    setStep(2);
+    push("<div>② 探测上游渠道…</div>");
+    const cr = await fetch("/api/check/all", { method: "POST", headers: authHeaders() });
+    check = await cr.json().catch(() => ({}));
+    if (!cr.ok) throw new Error((check.detail && (check.detail.message || check.detail)) || ("check " + cr.status));
+    let resultList = [];
+    if (Array.isArray(check.results)) resultList = check.results;
+    else if (Array.isArray(check.items)) resultList = check.items;
+    else if (check && typeof check === "object") {
+      resultList = Object.entries(check)
+        .filter(([k, v]) => k.includes("||") || (v && typeof v === "object" && (v.status || v.ok != null)))
+        .map(([k, v]) => {
+          const [provider, model] = String(k).split("||");
+          return { name: provider || k, provider, model: model || v.model, ok: v.status === "ok" || v.ok === true, status: v.status, detail: v.detail || v.error };
+        });
+    }
+    check.results = resultList;
+    const okN = resultList.filter(r => r && (r.ok || r.status === "ok")).length;
+    const failN = resultList.length - okN;
+    push(`<div>${failN ? "⚠️" : "✅"} 上游探测：成功 ${okN} / 失败 ${Math.max(0, failN)}</div>`);
+    if (failN > 0 && resultList.length) {
+      push("<ul style='margin:6px 0;padding-left:1.2em;color:#fecaca;font-size:12px'>" +
+        resultList.filter(r => r && !(r.ok || r.status === "ok")).slice(0, 5).map(r =>
+          `<li>${esc(r.name || r.provider || "?")} / ${esc(r.model || "")}：${esc(String(r.detail || r.error || "失败").slice(0,80))}</li>`
+        ).join("") + "</ul>");
+    }
+    setStep(2, "done");
+
+    setStep(3);
+    push("<div>③ 诊断本机客户端…</div>");
+    const dr = await fetch("/api/integrations/workbuddy/diagnose");
+    diag = await dr.json().catch(() => ({}));
+    const issues = diag.issues || [];
+    push(`<div>${diag.ok ? "✅" : "⚠️"} WorkBuddy：${diag.ok ? "通过" : "有问题"} · 大帅条目 ${diag.ours || 0}</div>`);
+    if (issues.length) {
+      push("<ul style='margin:6px 0;padding-left:1.2em;color:#fcd34d;font-size:12px'>" +
+        issues.slice(0, 6).map(x => `<li>${esc(x)}</li>`).join("") + "</ul>");
+    }
+    setStep(3, "done");
+  } catch (e) {
+    push(`<div style="color:#fecaca">体检中断：${esc(e.message || e)}</div>`);
+  }
+
+  if (fixes) {
+    const btns = [];
+    if (!lic || (!lic.valid && lic.require_license !== false)) {
+      btns.push(`<button class="btn btn-primary btn-sm" type="button" data-hw-go="shop">去购买/激活</button>`);
+      btns.push(`<button class="btn btn-secondary btn-sm" type="button" data-hw-go="home">粘贴 Key</button>`);
+    }
+    if (check && (check.results || []).some(r => r && !(r.ok || r.status === "ok"))) {
+      btns.push(`<button class="btn btn-secondary btn-sm" type="button" data-hw-go="providers">检查上游渠道</button>`);
+    }
+    if (diag && !diag.ok) {
+      btns.push(`<button class="btn btn-ok btn-sm" type="button" data-hw-sync="1">同步客户端</button>`);
+    }
+    btns.push(`<button class="btn btn-ghost btn-sm" type="button" data-hw-go="home">工作台粘贴区</button>`);
+    fixes.innerHTML = btns.join("");
+    fixes.querySelectorAll("[data-hw-go]").forEach(b => b.onclick = () => {
+      hideHealthWizard();
+      go(b.dataset.hwGo);
+    });
+    fixes.querySelectorAll("[data-hw-sync]").forEach(b => b.onclick = async () => {
+      hideHealthWizard();
+      await syncWorkBuddy();
+    });
+  }
+}
+function hideHealthWizard(){
+  const modal = $("#healthWizardModal");
+  if (modal) modal.classList.remove("show");
+}
+if ($("#btnHealthWizardClose")) $("#btnHealthWizardClose").onclick = () => hideHealthWizard();
+if ($("#btnHealthWizard")) $("#btnHealthWizard").onclick = () => runHealthWizard();
 
 async function saveAdvancedSettings(){
   try{
@@ -304,6 +446,7 @@ async function syncWorkBuddy(opts){
         toast("已同步 " + (j.count || 0) + " 个用途。" + keyLine + ideLine + "\n" + reload + "\n模型：" + names);
       }
     }
+    showRestartHints(j);
     return { ok: true, ready, count: j.count || 0, path: wbPath, raw: j };
   }catch(e){
     if (!silent) toast("同步失败：" + (e.message||"未知错误"), true);
@@ -460,6 +603,8 @@ function renderHome(j){
   if (pill && lic.pending_usage_count > 0) {
     pill.title = (lic.pending_usage_last_error || "有用量待上报") + "（" + lic.pending_usage_count + " 条）";
   }
+  updateHomeAlerts(j, lic, fails);
+  paintHomeLicenseCard(lic);
 
   $("#homeBase").textContent = base;
   $("#connBase").textContent = base;
@@ -505,6 +650,89 @@ function renderHome(j){
     go(b.dataset.go);
   });
   loadHomeUsageMini();
+  // soft-refresh cooling info for proactive banner
+  fetch("/api/health-board").then(r => r.ok ? r.json() : null).then(hb => {
+    if (!hb) return;
+    state._healthCooling = hb.cooling || [];
+    updateHomeAlerts(j, lic, fails);
+  }).catch(() => {});
+}
+
+function paintHomeLicenseCard(lic){
+  const remain = $("#homeLicRemain");
+  const hint = $("#homeLicHint");
+  if (!remain) return;
+  if (!lic || typeof lic !== "object") {
+    remain.textContent = "—";
+    if (hint) hint.textContent = "授权 Token / 有效期";
+    return;
+  }
+  if (lic.require_license === false && !lic.logged_in) {
+    remain.textContent = "开发模式";
+    if (hint) hint.textContent = "未强制授权";
+    return;
+  }
+  if (!lic.logged_in) {
+    remain.textContent = "未登录";
+    if (hint) hint.textContent = "请到购买页登录激活";
+    return;
+  }
+  const parts = [];
+  if (lic.token_unlimited) parts.push("Token 不限");
+  else if (lic.token_remaining != null) parts.push("剩 " + fmtNum(lic.token_remaining));
+  if (lic.time_unlimited) parts.push("不限时");
+  else if (lic.expire_at) parts.push("至 " + String(lic.expire_at).slice(0, 10));
+  remain.textContent = parts.join(" · ") || (lic.valid ? "已激活" : (lic.message || "无效"));
+  if (hint) {
+    const extras = [];
+    if (lic.plan_label) extras.push(lic.plan_label);
+    if (lic.low_balance || lic.lowBalance) extras.push("余量不足");
+    if (lic.pending_usage_count > 0) extras.push("待上报 " + lic.pending_usage_count);
+    hint.textContent = extras.join(" · ") || "网关权益";
+  }
+}
+
+function updateHomeAlerts(j, lic, fails){
+  const el = $("#homeAlertBanner");
+  if (!el) return;
+  if (sessionStorage.getItem("dashuai_alert_dismissed") === "1") {
+    el.classList.remove("show");
+    el.innerHTML = "";
+    return;
+  }
+  const items = [];
+  const snap = lic && typeof lic === "object" ? lic : (state.license || {});
+  const low = !!(snap.low_balance || snap.lowBalance)
+    || (!snap.token_unlimited && snap.token_quota > 0 && snap.token_remaining != null
+      && Number(snap.token_remaining) / Number(snap.token_quota) < 0.1);
+  if (low) items.push("授权余量不足，请续费或兑换卡密");
+  if (Number(snap.pending_usage_count || 0) > 0) {
+    items.push("有 " + snap.pending_usage_count + " 条用量待上报" + (snap.pending_usage_last_error ? "（" + String(snap.pending_usage_last_error).slice(0, 40) + "）" : ""));
+  }
+  if (fails && fails.length) {
+    items.push("近期有 " + fails.length + " 条鉴权/调用失败");
+  }
+  // channel balance / cooldown from last health-board cache
+  const cooling = state._healthCooling || [];
+  const balCool = cooling.filter(c => /balance|额度|余额|quota|insufficient/i.test(String(c.last_error || c.error_kind || "")));
+  if (balCool.length) items.push(balCool.length + " 个上游渠道因余额/额度冷却中");
+
+  if (!items.length) {
+    el.classList.remove("show");
+    el.innerHTML = "";
+    return;
+  }
+  el.classList.add("show");
+  el.innerHTML = `<div style="display:flex;justify-content:space-between;gap:10px;align-items:flex-start">
+    <div><b>需关注</b> · ${items.map(esc).join("；")}</div>
+    <button class="btn btn-ghost btn-sm" type="button" id="btnDismissAlert">本次忽略</button>
+  </div>`;
+  const btn = $("#btnDismissAlert");
+  if (btn) btn.onclick = () => {
+    sessionStorage.setItem("dashuai_alert_dismissed", "1");
+    el.classList.remove("show");
+    el.innerHTML = "";
+  };
 }
 
 function fmtNum(n){
@@ -585,16 +813,25 @@ async function loadUsage(){
 function renderHomeUsageMini(data){
   if (!data) return;
   const t = data.total || {};
-  const cards = [
-    { label: "输入 Token", value: t.pt },
-    { label: "输出 Token", value: t.ct },
-    { label: "合计 Token", value: t.tt },
-    { label: "请求数", value: t.requests },
-  ];
-  const el = $("#homeUsageOverview");
-  if (el) el.innerHTML = cards.map(c =>
-    `<div class="stat-card"><div class="k">${c.label}</div><div class="v">${fmtNum(c.value)}</div></div>`
-  ).join("");
+  const up = $("#homeUpstreamTotal");
+  const upHint = $("#homeUpstreamHint");
+  if (up) {
+    up.textContent = fmtNum(t.requests) + " 次";
+    if (upHint) upHint.textContent = `输入 ${fmtNum(t.pt)} · 输出 ${fmtNum(t.ct)} · 合计 ${fmtNum(t.tt)} Token`;
+  } else {
+    const el = $("#homeUsageOverview");
+    if (el && !el.querySelector("#homeLicCard")) {
+      el.innerHTML = [
+        { label: "输入 Token", value: t.pt },
+        { label: "输出 Token", value: t.ct },
+        { label: "合计 Token", value: t.tt },
+        { label: "请求数", value: t.requests },
+      ].map(c => `<div class="stat-card"><div class="k">${c.label}</div><div class="v">${fmtNum(c.value)}</div></div>`).join("");
+    }
+  }
+  // refresh license card from cached state
+  if (state.license) paintHomeLicenseCard(state.license);
+  else if (state.overview && state.overview.license) paintHomeLicenseCard(state.overview.license);
 }
 
 async function loadHomeUsageMini(){
@@ -1025,6 +1262,60 @@ $("#btnCopyCurl").onclick = () => {
 };
 $("#btnRefresh").onclick = refresh;
 $("#btnCheckAll").onclick = checkAll;
+if ($("#btnRouteTrial")) $("#btnRouteTrial").onclick = async () => {
+  const purpose = ($("#routeTrialPurpose") && $("#routeTrialPurpose").value) || "日常";
+  const chip = $("#routeTrialChip");
+  const box = $("#routeTrialResult");
+  if (chip) chip.textContent = "试跑中…";
+  if (box) { box.style.display = ""; box.textContent = "请求中…"; }
+  try {
+    const base = (state.overview && state.overview.openai_base) || "http://127.0.0.1:8010/v1";
+    const key = currentLocalKeyFromUi() || state.localKey;
+    const r = await fetch(base.replace(/\/$/, "") + "/chat/completions", {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer " + key,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: purpose,
+        messages: [{ role: "user", content: "用一句话回复：ping" }],
+        stream: false,
+        max_tokens: 32,
+        temperature: 0,
+      }),
+    });
+    const provider = r.headers.get("X-Gateway-Provider") || r.headers.get("x-gateway-provider") || "";
+    const upModel = r.headers.get("X-Gateway-Model") || r.headers.get("x-gateway-model") || "";
+    const text = await r.text();
+    let content = "";
+    let parsed = null;
+    try { parsed = JSON.parse(text); content = parsed?.choices?.[0]?.message?.content || ""; } catch (_) { content = text.slice(0, 200); }
+    let usedProvider = provider;
+    let usedModel = upModel;
+    if (!usedProvider) {
+      try {
+        const lr = await fetch("/api/call-log?limit=5");
+        const logs = await lr.json();
+        const hit = (logs || []).slice().reverse().find(x => x && (x.route === purpose || x.model === purpose || true));
+        if (hit) { usedProvider = hit.provider || usedProvider; usedModel = hit.model || usedModel; }
+      } catch (_) {}
+    }
+    if (chip) chip.textContent = r.ok ? ("命中 " + (usedProvider || "?") + (usedModel ? " / " + usedModel : "")) : ("失败 " + r.status);
+    if (box) {
+      box.innerHTML = `<div><span class="badge">${esc(purpose)}</span>${r.ok ? '<span class="chip ok">OK</span>' : '<span class="chip bad">失败</span>'}</div>
+        <div style="margin-top:8px">上游渠道：<b>${esc(usedProvider || "（响应头未返回，见调用日志）")}</b></div>
+        <div style="margin-top:4px;color:var(--muted)">上游模型：${esc(usedModel || "—")}</div>
+        <div style="margin-top:8px;white-space:pre-wrap;font-size:12px;color:var(--muted)">${esc(String(content || "").slice(0, 280))}</div>`;
+    }
+    if (!r.ok) toast("试跑失败 HTTP " + r.status, true);
+    else toast("试跑成功 · " + (usedProvider || purpose));
+  } catch (e) {
+    if (chip) chip.textContent = "失败";
+    if (box) box.textContent = "试跑失败：" + (e.message || e);
+    toast("试跑失败：" + (e.message || e), true);
+  }
+};
 $$("#usageTabs [data-days]").forEach(btn => {
   btn.onclick = () => {
     state.usageDays = Number(btn.dataset.days) || 1;
@@ -1656,6 +1947,10 @@ state.routeFilter = state.routeFilter || "";
       const j = await r.json();
       const cooling = j.cooling || [];
       const fails = j.recent_failures || [];
+      state._healthCooling = cooling;
+      if (state.overview) {
+        try { updateHomeAlerts(state.overview, state.overview.license || state.license, state.overview.recent_failures || []); } catch(_){}
+      }
       if (!cooling.length && !fails.length){
         box.innerHTML = `<div class="empty">当前没有冷却中的模型，也没有最近失败。</div>`;
         return;
@@ -1958,6 +2253,10 @@ state.routeFilter = state.routeFilter || "";
         || (snap && !snap.token_unlimited && snap.token_quota > 0 && snap.token_remaining != null
           && Number(snap.token_remaining) / Number(snap.token_quota) < 0.1);
       pill.style.color = low ? "#fecaca" : "";
+      const pn = snap && snap.pending_usage_count != null ? Number(snap.pending_usage_count) : 0;
+      pill.title = pn > 0
+        ? ((snap.pending_usage_last_error || "有用量待联网上报") + "（" + pn + " 条）")
+        : "权益";
     }
     const pendingChip = $("#pendingUsageChip");
     if (pendingChip) {

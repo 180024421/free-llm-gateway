@@ -81,6 +81,8 @@
 
   "license_api_base": "https://1ph1hf8043323.vicp.fun/api",
 
+  "license_api_base_fallback": "http://111.229.202.251:8687/api",
+
   "license_project_id": 4,
 
   "require_license": true,

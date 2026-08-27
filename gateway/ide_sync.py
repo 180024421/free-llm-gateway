@@ -151,6 +151,7 @@ def _sync_editor_settings(product: str, rel: str, base: str, key: str, dash: str
             "product": product,
             "path": str(path),
             "unchanged": True,
+            "need_restart": False,
             "models": len(routes),
         }
     if path.exists():
@@ -169,6 +170,7 @@ def _sync_editor_settings(product: str, rel: str, base: str, key: str, dash: str
         "backup": str(bak) if bak else "",
         "models": len(routes),
         "created": bak is None,
+        "need_restart": True,
     }
 
 
@@ -213,6 +215,7 @@ def _sync_continue(base: str, key: str, routes: list[str]) -> dict[str, Any]:
         "product": "continue",
         "path": str(path),
         "models": len(ours),
+        "need_restart": True,
     }
 
 
@@ -274,7 +277,13 @@ def _sync_jetbrains(base: str, key: str, dash: str, model: str) -> dict[str, Any
             "error": "no-idea-profile",
             "path": str(root),
         }
-    return {"ok": True, "product": "idea", "paths": written, "count": len(written)}
+    return {
+        "ok": True,
+        "product": "idea",
+        "paths": written,
+        "count": len(written),
+        "need_restart": True,
+    }
 
 
 def sync_ide_clients(

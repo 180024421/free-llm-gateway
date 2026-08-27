@@ -401,6 +401,26 @@ def sync_workbuddy(*, auto: bool = False) -> dict[str, Any]:
             ides = sync_ide_clients(cfg=cfg, routers=routers)
         except Exception as exc:  # noqa: BLE001
             ides = {"ok": False, "error": str(exc), "targets": []}
+    need_restart_apps: list[str] = []
+    # WorkBuddy: when not running, next open loads config; when running, hot_reload usually enough
+    if not running:
+        need_restart_apps.append("WorkBuddy")
+    # IDE targets that were actually written need a restart to reload settings
+    for t in (ides.get("targets") or []) if isinstance(ides, dict) else []:
+        if not isinstance(t, dict) or not t.get("ok") or t.get("skipped") or t.get("unchanged"):
+            continue
+        prod = str(t.get("product") or "").lower()
+        label = {
+            "cursor": "Cursor",
+            "vscode": "VS Code",
+            "code": "VS Code",
+            "idea": "IDEA",
+            "continue": "Continue",
+        }.get(prod, str(t.get("product") or prod))
+        if label and label not in need_restart_apps:
+            need_restart_apps.append(label)
+            t["need_restart"] = True
+    wb_need = bool(not running)
     return {
         "ok": True,
         "auto": auto,
@@ -413,7 +433,8 @@ def sync_workbuddy(*, auto: bool = False) -> dict[str, Any]:
         "providers_ready": ready,
         "workbuddy_running": running,
         "hot_reload": running,
-        "need_restart": False,
+        "need_restart": wb_need,
+        "need_restart_apps": need_restart_apps,
         "models": [
             {
                 "id": m["id"],

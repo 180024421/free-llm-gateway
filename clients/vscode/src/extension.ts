@@ -14,6 +14,10 @@ const ROUTE_OPTIONS = [
   { id: "Agent", label: "Agent" },
 ];
 
+const MAX_SESSION = 10;
+
+type ChatMsg = { role: "user" | "assistant"; content: string };
+
 function cfg() {
   const c = vscode.workspace.getConfiguration("dashuai");
   return {
@@ -27,23 +31,38 @@ function cfg() {
 
 class ChatViewProvider implements vscode.WebviewViewProvider {
   public static readonly viewType = "dashuai.chatView";
+  private session: ChatMsg[] = [];
+  private view?: vscode.WebviewView;
 
   constructor(private readonly ctx: vscode.ExtensionContext) {}
 
   resolveWebviewView(webviewView: vscode.WebviewView): void {
+    this.view = webviewView;
     webviewView.webview.options = { enableScripts: true };
     webviewView.webview.html = this.html(webviewView.webview);
     webviewView.webview.onDidReceiveMessage(async (msg) => {
+      if (msg?.type === "clear") {
+        this.session = [];
+        webviewView.webview.postMessage({ type: "cleared" });
+        return;
+      }
       if (msg?.type === "chat") {
+        const prompt = String(msg.prompt || "").trim();
+        if (!prompt) return;
+        this.session.push({ role: "user", content: prompt });
+        this.trimSession();
         try {
-          const answer = await chatOnce(String(msg.prompt || ""));
-          webviewView.webview.postMessage({ type: "reply", text: answer });
-        } catch (e: any) {
-          webviewView.webview.postMessage({
-            type: "reply",
-            text: `错误：${e?.message || e}`,
+          const answer = await this.chatWithStream(prompt, (delta) => {
+            webviewView.webview.postMessage({ type: "delta", text: delta });
           });
+          this.session.push({ role: "assistant", content: answer });
+          this.trimSession();
+          webviewView.webview.postMessage({ type: "done", text: answer });
+        } catch (e: any) {
+          const err = `错误：${e?.message || e}`;
+          webviewView.webview.postMessage({ type: "done", text: err, error: true });
         }
+        return;
       }
       if (msg?.type === "ready") {
         const c = cfg();
@@ -52,9 +71,34 @@ class ChatViewProvider implements vscode.WebviewViewProvider {
           baseUrl: c.baseUrl,
           model: c.model,
           routes: ROUTE_OPTIONS.map((r) => r.id),
+          history: this.session.slice(-MAX_SESSION),
         });
       }
     });
+  }
+
+  private trimSession() {
+    if (this.session.length > MAX_SESSION) {
+      this.session = this.session.slice(-MAX_SESSION);
+    }
+  }
+
+  private async chatWithStream(
+    prompt: string,
+    onDelta: (chunk: string) => void
+  ): Promise<string> {
+    const c = cfg();
+    const messages = [
+      ...this.session.slice(0, -1).map((m) => ({ role: m.role, content: m.content })),
+      { role: "user" as const, content: prompt },
+    ].slice(-MAX_SESSION);
+
+    if (!c.stream) {
+      const text = await chatOnce(prompt, messages);
+      if (text) onDelta(text);
+      return text;
+    }
+    return chatStream(prompt, c, onDelta, messages);
   }
 
   private html(webview: vscode.Webview): string {
@@ -66,19 +110,22 @@ class ChatViewProvider implements vscode.WebviewViewProvider {
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${csp} 'unsafe-inline'; script-src ${csp} 'unsafe-inline';" />
 <style>
   body{font-family:var(--vscode-font-family);color:var(--vscode-foreground);margin:0;padding:10px;background:var(--vscode-sideBar-background)}
-  #log{height:calc(100vh - 150px);overflow:auto;display:flex;flex-direction:column;gap:8px}
+  #log{height:calc(100vh - 170px);overflow:auto;display:flex;flex-direction:column;gap:8px}
   .bubble{padding:8px 10px;border-radius:10px;line-height:1.5;white-space:pre-wrap}
   .user{background:var(--vscode-button-background);color:var(--vscode-button-foreground);align-self:flex-end;max-width:92%}
   .bot{background:var(--vscode-input-background);border:1px solid var(--vscode-input-border);align-self:flex-start;max-width:92%}
-  .meta{font-size:11px;opacity:.7;margin-bottom:8px}
+  .meta{font-size:11px;opacity:.7;margin-bottom:6px;display:flex;justify-content:space-between;align-items:center;gap:8px}
   .row{display:flex;gap:6px;margin-top:8px}
   textarea{flex:1;min-height:64px;resize:vertical;background:var(--vscode-input-background);color:var(--vscode-input-foreground);border:1px solid var(--vscode-input-border);border-radius:8px;padding:8px}
   button{background:var(--vscode-button-background);color:var(--vscode-button-foreground);border:0;border-radius:8px;padding:0 12px;cursor:pointer}
-  select{background:var(--vscode-input-background);color:var(--vscode-input-foreground);border:1px solid var(--vscode-input-border);border-radius:8px;padding:4px 8px;font-size:12px}
+  button.ghost{background:transparent;border:1px solid var(--vscode-input-border);color:var(--vscode-foreground);font-size:11px;padding:2px 8px}
 </style>
 </head>
 <body>
-  <div class="meta" id="meta">大帅网关 · 连接中…</div>
+  <div class="meta">
+    <span id="meta">大帅网关 · 连接中…</span>
+    <button class="ghost" type="button" id="clear">清空对话</button>
+  </div>
   <div id="log"></div>
   <div class="row">
     <textarea id="prompt" placeholder="问点什么…"></textarea>
@@ -89,28 +136,49 @@ class ChatViewProvider implements vscode.WebviewViewProvider {
     const log = document.getElementById('log');
     const meta = document.getElementById('meta');
     const prompt = document.getElementById('prompt');
+    let streamingEl = null;
     function add(role, text){
       const d=document.createElement('div');
       d.className='bubble '+(role==='user'?'user':'bot');
       d.textContent=text;
       log.appendChild(d);
       log.scrollTop=log.scrollHeight;
+      return d;
     }
+    function resetLog(history){
+      log.innerHTML='';
+      streamingEl=null;
+      (history||[]).forEach(m => add(m.role==='user'?'user':'bot', m.content||''));
+    }
+    document.getElementById('clear').onclick=()=>{
+      vscode.postMessage({type:'clear'});
+    };
     document.getElementById('send').onclick=()=>{
       const t=prompt.value.trim();
       if(!t) return;
       add('user', t);
       prompt.value='';
-      add('bot', '思考中…');
+      streamingEl = add('bot', '');
       vscode.postMessage({type:'chat', prompt:t});
     };
     window.addEventListener('message', ev=>{
       const m=ev.data||{};
-      if(m.type==='config'){ meta.textContent='大帅网关 · '+m.model+' · '+m.baseUrl; }
-      if(m.type==='reply'){
-        const bots=[...log.querySelectorAll('.bot')];
-        if(bots.length) bots[bots.length-1].textContent=m.text;
-        else add('bot', m.text);
+      if(m.type==='config'){
+        meta.textContent='大帅网关 · '+m.model+' · '+m.baseUrl;
+        if (m.history && m.history.length) resetLog(m.history);
+      }
+      if(m.type==='cleared'){ resetLog([]); }
+      if(m.type==='delta'){
+        if(!streamingEl) streamingEl = add('bot', '');
+        streamingEl.textContent = (streamingEl.textContent||'') + (m.text||'');
+        log.scrollTop=log.scrollHeight;
+      }
+      if(m.type==='done'){
+        if(!streamingEl) streamingEl = add('bot', '');
+        // Prefer full text on done (non-stream path); keep appended if already streaming
+        if (m.text && (!streamingEl.textContent || m.error)) streamingEl.textContent = m.text;
+        else if (m.text && streamingEl.textContent.length < m.text.length) streamingEl.textContent = m.text;
+        streamingEl = null;
       }
     });
     vscode.postMessage({type:'ready'});
@@ -143,11 +211,11 @@ async function fetchLicenseStatus(): Promise<string> {
   return parts.join(" · ");
 }
 
-async function chatOnce(prompt: string): Promise<string> {
+async function chatOnce(
+  prompt: string,
+  messages?: { role: string; content: string }[]
+): Promise<string> {
   const c = cfg();
-  if (c.stream) {
-    return chatStream(prompt, c);
-  }
   const res = await fetch(`${c.baseUrl}/chat/completions`, {
     method: "POST",
     headers: {
@@ -156,7 +224,9 @@ async function chatOnce(prompt: string): Promise<string> {
     },
     body: JSON.stringify({
       model: c.model,
-      messages: [{ role: "user", content: prompt }],
+      messages: messages?.length
+        ? messages
+        : [{ role: "user", content: prompt }],
       stream: false,
       temperature: 0.7,
     }),
@@ -174,7 +244,9 @@ async function chatOnce(prompt: string): Promise<string> {
 
 async function chatStream(
   prompt: string,
-  c: ReturnType<typeof cfg>
+  c: ReturnType<typeof cfg>,
+  onDelta?: (chunk: string) => void,
+  messages?: { role: string; content: string }[]
 ): Promise<string> {
   const res = await fetch(`${c.baseUrl}/chat/completions`, {
     method: "POST",
@@ -184,7 +256,9 @@ async function chatStream(
     },
     body: JSON.stringify({
       model: c.model,
-      messages: [{ role: "user", content: prompt }],
+      messages: messages?.length
+        ? messages
+        : [{ role: "user", content: prompt }],
       stream: true,
       temperature: 0.7,
     }),
@@ -214,7 +288,10 @@ async function chatStream(
       try {
         const obj = JSON.parse(payload);
         const delta = obj?.choices?.[0]?.delta?.content;
-        if (typeof delta === "string") out += delta;
+        if (typeof delta === "string" && delta) {
+          out += delta;
+          if (onDelta) onDelta(delta);
+        }
       } catch {
         /* ignore partial json */
       }

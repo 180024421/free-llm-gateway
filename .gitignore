@@ -12,6 +12,7 @@ data/usage.jsonl
 data/history.jsonl
 data/session.json
 data/.license_hmac
+data/machine-id
 data/channel_health.json
 data/*.bak
 data/_import_*.json

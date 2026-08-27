@@ -74,6 +74,7 @@ from .license import (
     entitlement_snapshot,
     flush_pending_usage,
     jane_request,
+    license_api_configured,
     license_required,
     load_session,
     refresh_status,
@@ -254,7 +255,7 @@ async def ensure_not_maintenance() -> None:
         return
     enabled = False
     message = ""
-    if (cfg.get("license_api_base") or "").strip():
+    if license_api_configured(cfg):
         try:
             data = await jane_request("GET", "/gateway/meta/bootstrap", timeout=6.0)
             if isinstance(data, dict):
@@ -1077,10 +1078,10 @@ async def api_remote_bootstrap() -> dict[str, Any]:
     local = {
         "version": __version__,
         "require_license": license_required(cfg),
-        "license_api_base": bool((cfg.get("license_api_base") or "").strip()),
+        "license_api_base": license_api_configured(cfg),
         "project_id": cfg.get("license_project_id"),
     }
-    if not (cfg.get("license_api_base") or "").strip():
+    if not license_api_configured(cfg):
         return {
             **local,
             "announcement": "未配置授权服务地址（license_api_base）。开发模式可关闭 require_license。",

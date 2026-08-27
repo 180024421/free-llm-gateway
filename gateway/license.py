@@ -30,6 +30,8 @@ from .config import DATA_DIR, load_config, save_json, load_json
 
 SESSION_PATH = DATA_DIR / "session.json"
 _SECRET_PATH_NAME = ".license_hmac"
+_MACHINE_ID_FILE = "machine-id"
+_VICP_FALLBACK_BASE = "http://111.229.202.251:8687/api"
 _refresh_ts = 0.0
 _REFRESH_INTERVAL = 300.0
 
@@ -85,18 +87,68 @@ def license_required(cfg: dict[str, Any] | None = None) -> bool:
         return False
     if flag is True:
         return True
-    return bool((cfg.get("license_api_base") or "").strip())
+    return license_api_configured(cfg)
 
 
-def device_fingerprint() -> str:
+def _legacy_device_fingerprint() -> str:
+    """Pre-stable algorithm (hostname|OS|username); used once to migrate signed cache."""
     raw = f"{platform.node()}|{platform.system()}|{os.environ.get('USERNAME') or os.environ.get('USER') or ''}"
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
 
 
-def _sign_payload(payload: dict[str, Any]) -> str:
+def _machine_id_path() -> Path:
+    from . import config as cfg_mod
+
+    return Path(cfg_mod.DATA_DIR) / _MACHINE_ID_FILE
+
+
+def _read_or_create_machine_id() -> str:
+    path = _machine_id_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        mid = path.read_text(encoding="utf-8").strip()
+        if mid:
+            return mid
+    mid = str(uuid.uuid4())
+    try:
+        fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        try:
+            os.write(fd, (mid + "\n").encode("utf-8"))
+        finally:
+            os.close(fd)
+    except FileExistsError:
+        mid = path.read_text(encoding="utf-8").strip() or mid
+    except Exception:
+        try:
+            path.write_text(mid + "\n", encoding="utf-8")
+        except Exception:
+            pass
+    try:
+        os.chmod(path, 0o600)
+    except Exception:
+        pass
+    return mid
+
+
+def device_fingerprint() -> str:
+    mid = _read_or_create_machine_id()
+    return hashlib.sha256(f"dashuai-gateway:{mid}".encode("utf-8")).hexdigest()[:32]
+
+
+def _sign_payload_for(payload: dict[str, Any], fingerprint: str) -> str:
     body = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    key = _hmac_secret() + device_fingerprint().encode("utf-8")
+    key = _hmac_secret() + fingerprint.encode("utf-8")
     return hmac.new(key, body.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def _verify_entitlement_sig(ent: dict[str, Any], fingerprint: str) -> bool:
+    check = {k: v for k, v in ent.items() if k != "_sig"}
+    expected = _sign_payload_for(check, fingerprint)
+    return hmac.compare_digest(expected, str(ent.get("_sig")))
+
+
+def _sign_payload(payload: dict[str, Any]) -> str:
+    return _sign_payload_for(payload, device_fingerprint())
 
 
 def load_session() -> dict[str, Any]:
@@ -111,10 +163,18 @@ def load_session() -> dict[str, Any]:
         pass
     ent = data.get("entitlement")
     if isinstance(ent, dict) and ent.get("_sig"):
-        check = {k: v for k, v in ent.items() if k != "_sig"}
-        if not hmac.compare_digest(_sign_payload(check), str(ent.get("_sig"))):
-            data["entitlement"] = None
-            data["entitlement_corrupt"] = True
+        fp = device_fingerprint()
+        if not _verify_entitlement_sig(ent, fp):
+            # Migration: older builds signed with hostname|OS|username fingerprint.
+            if _verify_entitlement_sig(ent, _legacy_device_fingerprint()):
+                clean = {k: v for k, v in ent.items() if k != "_sig"}
+                clean["device"] = fp
+                clean["_sig"] = _sign_payload(clean)
+                data["entitlement"] = clean
+                save_session(data)
+            else:
+                data["entitlement"] = None
+                data["entitlement_corrupt"] = True
     return data
 
 
@@ -144,11 +204,11 @@ def clear_session() -> None:
         path.unlink()
 
 
-def jane_base(cfg: dict[str, Any] | None = None) -> str:
-    cfg = cfg or load_config()
-    raw = migrate_public_license_base((cfg.get("license_api_base") or "").strip())
-    if not raw:
-        return ""
+def license_api_configured(cfg: dict[str, Any] | None = None) -> bool:
+    return bool(jane_bases(cfg))
+
+
+def _normalize_license_base(raw: str, cfg: dict[str, Any]) -> str:
     from urllib.parse import urlparse, urlunparse
 
     parsed = urlparse(raw)
@@ -156,13 +216,51 @@ def jane_base(cfg: dict[str, Any] | None = None) -> str:
     is_local = host in {"127.0.0.1", "localhost", "::1"}
     is_ip = bool(host) and host.replace(".", "").isdigit()
     allow_insecure = bool(cfg.get("license_allow_insecure_http"))
-    # 仅本机 / 裸 IP 在显式允许时可用 HTTP；花生壳等域名一律保持 HTTPS
     if parsed.scheme.lower() == "https" and allow_insecure and (is_local or is_ip):
         raw = urlunparse(("http", parsed.netloc, parsed.path, parsed.params, parsed.query, parsed.fragment))
         return raw.rstrip("/")
     if is_local or (allow_insecure and is_ip):
         return raw.rstrip("/")
     return force_https_url(raw).rstrip("/")
+
+
+def _collect_base_urls(raw: Any, cfg: dict[str, Any]) -> list[str]:
+    out: list[str] = []
+    items: list[Any]
+    if isinstance(raw, list):
+        items = raw
+    elif isinstance(raw, str) and raw.strip():
+        items = [raw]
+    else:
+        items = []
+    for item in items:
+        migrated = migrate_public_license_base(str(item or "").strip())
+        if migrated:
+            out.append(_normalize_license_base(migrated, cfg))
+    return out
+
+
+def jane_bases(cfg: dict[str, Any] | None = None) -> list[str]:
+    cfg = cfg or load_config()
+    bases = _collect_base_urls(cfg.get("license_api_base"), cfg)
+    fallback_raw = cfg.get("license_api_base_fallback")
+    if fallback_raw is not None:
+        bases.extend(_collect_base_urls(fallback_raw, cfg))
+    elif bases and any("vicp.fun" in b.lower() for b in bases):
+        bases.append(_VICP_FALLBACK_BASE.rstrip("/"))
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for base in bases:
+        b = base.rstrip("/")
+        if b and b not in seen:
+            seen.add(b)
+            ordered.append(b)
+    return ordered
+
+
+def jane_base(cfg: dict[str, Any] | None = None) -> str:
+    bases = jane_bases(cfg)
+    return bases[0] if bases else ""
 
 
 def _auth_header(token: str | None = None) -> dict[str, str]:
@@ -184,7 +282,45 @@ def _unwrap(body: Any) -> Any:
     return body
 
 
-async def jane_request(
+def _is_auth_failure(status_code: int) -> bool:
+    return status_code in (401, 403)
+
+
+def _is_retryable_http(status_code: int) -> bool:
+    return status_code >= 500
+
+
+def _assert_commercial_https(base: str) -> None:
+    if not base.lower().startswith("http://") or not is_commercial_build():
+        return
+    host = ""
+    try:
+        from urllib.parse import urlparse
+
+        host = (urlparse(base).hostname or "").lower()
+    except Exception:
+        host = ""
+    allow_insecure = bool(load_config().get("license_allow_insecure_http"))
+    if host not in {"127.0.0.1", "localhost", "::1"} and not allow_insecure and not host.replace(".", "").isdigit():
+        raise HTTPException(status_code=503, detail="正式版要求 license_api_base 使用 HTTPS（或设置 license_allow_insecure_http）")
+
+
+def invalidate_auth_session(message: str = "请重新登录") -> None:
+    sess = load_session()
+    ent = sess.get("entitlement") if isinstance(sess.get("entitlement"), dict) else {}
+    sess.pop("token", None)
+    sess.pop("refresh_token", None)
+    if ent:
+        ent["valid"] = False
+        ent["message"] = message
+        sess["entitlement"] = ent
+    else:
+        sess["entitlement"] = {"valid": False, "message": message, "cached_at": time.time()}
+    save_session(sess)
+
+
+async def _jane_http_once(
+    base: str,
     method: str,
     path: str,
     *,
@@ -193,21 +329,8 @@ async def jane_request(
     token: str | None = None,
     timeout: float = 30.0,
 ) -> Any:
-    base = jane_base()
-    if not base:
-        raise HTTPException(status_code=503, detail="未配置 license_api_base，无法连接授权服务")
-    if base.lower().startswith("http://") and is_commercial_build():
-        host = ""
-        try:
-            from urllib.parse import urlparse
-
-            host = (urlparse(base).hostname or "").lower()
-        except Exception:
-            host = ""
-        allow_insecure = bool(load_config().get("license_allow_insecure_http"))
-        if host not in {"127.0.0.1", "localhost", "::1"} and not allow_insecure and not host.replace(".", "").isdigit():
-            raise HTTPException(status_code=503, detail="正式版要求 license_api_base 使用 HTTPS（或设置 license_allow_insecure_http）")
-    url = f"{base}{path if path.startswith('/') else '/' + path}"
+    _assert_commercial_https(base)
+    url = f"{base.rstrip('/')}{path if path.startswith('/') else '/' + path}"
     headers = {"Accept": "application/json", **_auth_header(token)}
     try:
         headers["X-Device-Fingerprint"] = device_fingerprint()
@@ -225,6 +348,108 @@ async def jane_request(
     if isinstance(body, dict) and body.get("code") not in (None, 200, "200"):
         raise HTTPException(status_code=400, detail=str(body.get("message") or "业务错误"))
     return _unwrap(body)
+
+
+async def try_refresh_session_token() -> bool:
+    """POST /user/refreshToken once; updates session token on success."""
+    sess = load_session()
+    refresh = (sess.get("refresh_token") or "").strip()
+    access = (sess.get("token") or "").strip()
+    if not refresh:
+        return False
+    body = {"token": access, "refreshToken": refresh}
+    for base in jane_bases():
+        try:
+            data = await _jane_http_once(
+                base,
+                "POST",
+                "/user/refreshToken",
+                json_body=body,
+                token=None,
+                timeout=15.0,
+            )
+            if isinstance(data, dict) and data.get("token"):
+                sess = load_session()
+                sess["token"] = data.get("token")
+                new_rt = data.get("refreshToken") or data.get("refresh_token")
+                if new_rt:
+                    sess["refresh_token"] = new_rt
+                if data.get("userId") or data.get("user_id"):
+                    sess["user_id"] = data.get("userId") or data.get("user_id")
+                if data.get("username"):
+                    sess["username"] = data.get("username")
+                save_session(sess)
+                return True
+        except HTTPException as e:
+            if _is_retryable_http(e.status_code):
+                continue
+            return False
+        except (httpx.TimeoutException, httpx.ConnectError, httpx.NetworkError, httpx.ReadError):
+            continue
+        except Exception:
+            return False
+    return False
+
+
+async def jane_request(
+    method: str,
+    path: str,
+    *,
+    json_body: Any = None,
+    params: dict[str, Any] | None = None,
+    token: str | None = None,
+    timeout: float = 30.0,
+    allow_refresh: bool = True,
+) -> Any:
+    bases = jane_bases()
+    if not bases:
+        raise HTTPException(status_code=503, detail="未配置 license_api_base，无法连接授权服务")
+
+    last_exc: HTTPException | None = None
+    auth_retried = False
+
+    for base in bases:
+        try:
+            return await _jane_http_once(
+                base,
+                method,
+                path,
+                json_body=json_body,
+                params=params,
+                token=token,
+                timeout=timeout,
+            )
+        except HTTPException as e:
+            if _is_auth_failure(e.status_code):
+                if (
+                    allow_refresh
+                    and not auth_retried
+                    and path not in ("/user/refreshToken", "/user/login", "/user/register")
+                ):
+                    auth_retried = True
+                    if await try_refresh_session_token():
+                        return await jane_request(
+                            method,
+                            path,
+                            json_body=json_body,
+                            params=params,
+                            token=token,
+                            timeout=timeout,
+                            allow_refresh=False,
+                        )
+                invalidate_auth_session("登录已过期，请重新登录")
+                raise HTTPException(status_code=e.status_code, detail="登录已过期，请重新登录")
+            if 400 <= e.status_code < 500:
+                raise
+            last_exc = e
+        except (httpx.TimeoutException, httpx.ConnectError, httpx.NetworkError, httpx.ReadError) as e:
+            last_exc = HTTPException(status_code=503, detail=str(e) or "网络错误")
+        except Exception as e:
+            last_exc = HTTPException(status_code=503, detail=str(e) or "授权服务不可用")
+
+    if last_exc:
+        raise last_exc
+    raise HTTPException(status_code=503, detail="授权服务不可用")
 
 
 def cache_entitlement(status: dict[str, Any]) -> None:
@@ -338,7 +563,14 @@ async def refresh_status(force: bool = False) -> dict[str, Any]:
         if isinstance(data, dict):
             cache_entitlement(data)
             _refresh_ts = time.time()
-    except HTTPException:
+    except HTTPException as e:
+        if _is_auth_failure(e.status_code):
+            # invalidate_auth_session already ran inside jane_request
+            pass
+        elif _is_retryable_http(e.status_code) or e.status_code == 503:
+            # Network / 5xx: keep cached entitlement for offline grace
+            pass
+    except Exception:
         pass
     return entitlement_snapshot()
 
