@@ -44,9 +44,23 @@ button,input,textarea,select{font:inherit} button{cursor:pointer}
 .head h2{margin:0;font-size:20px}.head p{margin:4px 0 0;color:var(--muted);font-size:13px}
 .cards{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-bottom:14px}
 .card{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:14px}
-.card .k{color:var(--muted);font-size:12px}.card .v{margin-top:8px;font-size:24px;font-weight:700}.card .h{margin-top:6px;color:var(--muted);font-size:12px;min-height:18px}
+.card .k{color:var(--muted);font-size:12px}.card .v{margin-top:8px;font-size:24px;font-weight:700}.card .h{margin-top:6px;color:var(--muted);font-size:12px;min-height:18px;word-break:break-all}
+.card-link{display:block;width:100%;text-align:left;color:inherit;cursor:pointer;transition:border-color .15s,background .15s,transform .12s;position:relative}
+.card-link:hover{border-color:rgba(59,130,246,.45);background:rgba(59,130,246,.08);transform:translateY(-1px)}
+.card-link:focus-visible{outline:2px solid rgba(59,130,246,.55);outline-offset:2px}
+.card-link .go-hint{position:absolute;top:10px;right:12px;font-size:11px;color:var(--muted);opacity:.0;transition:opacity .15s}
+.card-link:hover .go-hint{opacity:1;color:#93c5fd}
 .panel{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:16px;margin-bottom:14px}
 .panel h3{margin:0 0 4px;font-size:15px}.panel .desc{margin:0 0 14px;color:var(--muted);font-size:12px}
+.home-quick{padding:0;overflow:hidden}
+.home-quick-top{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;padding:12px 16px;background:rgba(34,197,94,.06);border-bottom:1px solid var(--line)}
+.home-quick-top .toggle-row{display:flex;align-items:center;gap:10px;font-size:14px;font-weight:600}
+.home-quick-top .toggle-row input{width:16px;height:16px;accent-color:var(--ok)}
+.home-quick-top .hint{font-size:12px;color:var(--muted);margin:0;flex:1;min-width:180px}
+.home-quick-body{padding:16px}
+.home-quick-body .actions-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:12px}
+.home-paste{min-height:88px;width:100%;resize:vertical;font-family:Consolas,"Cascadia Mono",monospace;font-size:13px;background:#0b1220;border:1px solid var(--line);border-radius:10px;color:var(--text);padding:12px;outline:none}
+.home-paste:focus{border-color:rgba(59,130,246,.5);box-shadow:0 0 0 3px rgba(59,130,246,.12)}
 .split{display:grid;grid-template-columns:1.15fr .85fr;gap:14px}
 .field{margin-bottom:12px}.field label{display:block;margin-bottom:6px;color:var(--muted);font-size:12px}
 .field input,.field textarea,.field select{width:100%;border:1px solid var(--line);background:#0c1424;color:var(--text);border-radius:10px;padding:10px 12px;outline:none}
@@ -111,7 +125,6 @@ th{color:var(--muted);font-size:12px;font-weight:600}
 .wizard-bar .wstep.done{border-color:rgba(34,197,94,.4);background:rgba(34,197,94,.08);color:#86efac}
 .wizard-bar .wstep.cur{border-color:rgba(59,130,246,.45);background:rgba(59,130,246,.12);color:#fff}
 .wizard-bar .wstep b{display:block;font-size:13px;margin-bottom:2px;color:var(--text)}
-.home-paste{min-height:72px;font-family:Consolas,monospace;font-size:12px}
 .home-mini-log{max-height:160px;overflow:auto;font-size:12px}
 .wb-steps li{margin:4px 0}
 @keyframes spin{to{transform:rotate(360deg)}}
@@ -255,28 +268,47 @@ th{color:var(--muted);font-size:12px;font-weight:600}
           <div id="homeFailList"></div>
         </div>
         <div class="cards">
-          <div class="card"><div class="k">网关</div><div class="v" id="statOnline">—</div><div class="h" id="statOnlineHint">本机服务</div></div>
-          <div class="card"><div class="k">可用渠道</div><div class="v" id="statReady">—</div><div class="h" id="statReadyHint">已填有效 Key</div></div>
-          <div class="card"><div class="k">路由模型</div><div class="v" id="statRoutes">—</div><div class="h">客户端填这些名字</div></div>
-          <div class="card"><div class="k">最近上游</div><div class="v" id="statLastUp" style="font-size:15px">—</div><div class="h" id="statLastUpHint">发对话后显示打到哪家</div></div>
+          <button type="button" class="card card-link" data-go="connect" title="打开接入参数">
+            <span class="go-hint">接入 →</span>
+            <div class="k">网关</div>
+            <div class="v" id="statOnline">—</div>
+            <div class="h" id="statOnlineHint">本机服务</div>
+          </button>
+          <button type="button" class="card card-link" data-go="providers" title="打开上游渠道">
+            <span class="go-hint">渠道 →</span>
+            <div class="k">可用渠道</div>
+            <div class="v" id="statReady">—</div>
+            <div class="h" id="statReadyHint">已填有效 Key</div>
+          </button>
+          <button type="button" class="card card-link" data-go="routes" title="打开路由模型">
+            <span class="go-hint">路由 →</span>
+            <div class="k">路由模型</div>
+            <div class="v" id="statRoutes">—</div>
+            <div class="h">客户端填这些名字</div>
+          </button>
+          <button type="button" class="card card-link" data-go="monitor" title="打开运行监控">
+            <span class="go-hint">监控 →</span>
+            <div class="k">最近上游</div>
+            <div class="v" id="statLastUp" style="font-size:15px">—</div>
+            <div class="h" id="statLastUpHint">发对话后显示打到哪家</div>
+          </button>
         </div>
-        <div class="panel" style="border-color:rgba(34,197,94,.35)">
-          <h3>国内模式（无 VPN 必开）</h3>
-          <p class="desc" style="margin-bottom:8px">开启后<strong>不会再尝试</strong> NVIDIA / Gemini / OpenRouter 等海外接口，避免卡住空转。勾选即保存。</p>
-          <label class="inline" style="gap:10px;font-size:15px"><input type="checkbox" id="cnOnlyToggle" /> 仅使用国内渠道（推荐）</label>
-          <p class="desc" id="cnOnlyHint" style="margin-top:8px;margin-bottom:0">未开启时仍会按权重尝试海外模型。</p>
-        </div>
-        <div class="panel">
-          <h3>① 粘贴上游 API Key → 一键搞定</h3>
-          <p class="desc">一行一个或混贴均可。推荐先贴魔搭 <a class="hint-link" href="https://modelscope.cn/my/myaccesstoken" target="_blank" rel="noreferrer">ms-…</a>；有 VPN 再贴 <a class="hint-link" href="https://build.nvidia.com/" target="_blank" rel="noreferrer">NVIDIA</a>。</p>
-          <textarea id="homePaste" class="home-paste" placeholder="例：ms-xxx（推荐）或 sk-xxx；有 VPN 再贴 nvapi-xxx"></textarea>
-          <div class="inline" style="margin-top:10px;flex-wrap:wrap">
-            <button class="btn btn-ok" type="button" id="btnHomeImportSync">导入并同步客户端（推荐）</button>
-            <button class="btn btn-secondary btn-sm" type="button" id="btnHomeParse">仅识别</button>
-            <button class="btn btn-ghost btn-sm" type="button" id="btnHomeImport">仅导入不同步</button>
-            <span class="chip" id="homeSetupResult">等待粘贴</span>
+        <div class="panel home-quick">
+          <div class="home-quick-top">
+            <label class="toggle-row"><input type="checkbox" id="cnOnlyToggle" /> 国内模式（无 VPN 推荐开）</label>
+            <p class="hint" id="cnOnlyHint">跳过 NVIDIA / Gemini 等海外接口，避免卡住。</p>
           </div>
-          <p class="desc" style="margin-top:8px;margin-bottom:0">此按钮 = 识别 Key → 启用渠道 → 写入 WorkBuddy / Cursor。完成后在客户端选「日常 · 大帅网关」。</p>
+          <div class="home-quick-body">
+            <h3 style="margin:0 0 6px">粘贴上游 API Key</h3>
+            <p class="desc" style="margin:0 0 10px">一行一个或混贴均可。优先魔搭 <a class="hint-link" href="https://modelscope.cn/my/myaccesstoken" target="_blank" rel="noreferrer">ms-…</a>；有 VPN 再贴 <a class="hint-link" href="https://build.nvidia.com/" target="_blank" rel="noreferrer">NVIDIA</a>。</p>
+            <textarea id="homePaste" class="home-paste" placeholder="粘贴 Key 后点下方绿色按钮即可（识别 → 启用 → 同步客户端）"></textarea>
+            <div class="actions-row">
+              <button class="btn btn-ok" type="button" id="btnHomeImportSync">导入并同步客户端</button>
+              <button class="btn btn-ghost btn-sm" type="button" id="btnHomeParse">仅识别</button>
+              <button class="btn btn-ghost btn-sm" type="button" id="btnHomeImport">仅导入</button>
+              <span class="chip" id="homeSetupResult">等待粘贴</span>
+            </div>
+          </div>
         </div>
         <div class="split">
           <div class="panel">

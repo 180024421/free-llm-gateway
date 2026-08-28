@@ -159,9 +159,24 @@ async function importSetupKeys(opts) {
     if (upsertProvider(list, "OpenAI-Compatible", oai, oaiBase)) n += 1;
     state.providers = list;
     await saveProviders(false);
+    // 无 VPN 友好：只贴了国内 Key（魔搭/兼容）且没贴 NVIDIA → 自动开国内模式
+    const onlyDomestic = !keyReady(nvidia) && (keyReady(ms) || keyReady(oai));
+    if (onlyDomestic) {
+      const cnEl = $("#cnOnlyToggle");
+      if (cnEl) cnEl.checked = true;
+      const cnEl2 = $("#cnOnlyToggle2");
+      if (cnEl2) cnEl2.checked = true;
+      await saveNetPrefs({ silent: true });
+    } else if (keyReady(nvidia) && !keyReady(ms) && !keyReady(oai)) {
+      // 只有 NVIDIA：提醒无 VPN 会挂
+      const cnOn = ($("#cnOnlyToggle") && $("#cnOnlyToggle").checked) || ($("#cnOnlyToggle2") && $("#cnOnlyToggle2").checked);
+      if (cnOn) {
+        toast("国内模式已开，但当前只有 NVIDIA Key（海外）。请再贴魔搭 ms- Key，否则无可用渠道。", true);
+      }
+    }
     if ($("#setupResult")) $("#setupResult").textContent = "已导入 " + n + " 项";
     if ($("#homeSetupResult")) $("#homeSetupResult").textContent = "已导入 " + n + " 项";
-    toast("一键导入成功（" + n + " 项）");
+    toast("一键导入成功（" + n + " 项）" + (onlyDomestic ? " · 已自动开启国内模式" : ""));
     for (const p of state.providers) {
       if (p.enabled && keyReady(p.api_key)) {
         try {
@@ -392,12 +407,55 @@ async function saveAdvancedSettings(){
     if (hedge) cur.fast_hedged_requests = !!hedge.checked;
     if (plimit) cur.provider_concurrency_limit = !!plimit.checked;
     if (uasync) cur.usage_async_write = !!uasync.checked;
+    const cn = $("#cnOnlyToggle2") || $("#cnOnlyToggle");
+    const ex = $("#exposeUpstreamToggle2");
+    const asw = $("#autoSyncWbToggle");
+    if (cn) cur.cn_only = !!cn.checked;
+    if (ex) cur.expose_upstream_model = !!ex.checked;
+    if (asw) cur.auto_sync_workbuddy = !!asw.checked;
+    ["#cnOnlyToggle", "#cnOnlyToggle2"].forEach(sel => { const el = $(sel); if (el && cn) el.checked = !!cn.checked; });
     const r = await fetch("/api/config", { method: "PUT", headers: authHeaders(), body: JSON.stringify(cur) });
     if (!r.ok) throw new Error("save");
     try { await fetch("/api/routers/rebuild-smart", { method: "POST", headers: authHeaders() }); } catch (_) {}
     toast("高级设置已保存");
+    const hint = $("#cnOnlyHint");
+    if (hint && cn) {
+      hint.textContent = cn.checked
+        ? "已开启：只走国内。若只有 NVIDIA Key，请再贴一个魔搭/硅基 Key。"
+        : "未开启：仍会尝试海外模型（无 VPN 容易卡住）。";
+    }
   }catch(_){
     toast("保存高级设置失败", true);
+  }
+}
+
+async function saveNetPrefs(opts){
+  const silent = !!(opts && opts.silent);
+  try{
+    const curResp = await fetch("/api/config", { headers: authHeaders() });
+    if (!curResp.ok) throw new Error("config");
+    const cur = await curResp.json();
+    const cn = $("#cnOnlyToggle") || $("#cnOnlyToggle2");
+    const ex = $("#exposeUpstreamToggle2") || $("#exposeUpstreamToggle");
+    const asw = $("#autoSyncWbToggle");
+    if (cn) cur.cn_only = !!cn.checked;
+    if (ex) cur.expose_upstream_model = !!ex.checked;
+    if (asw) cur.auto_sync_workbuddy = !!asw.checked;
+    ["#cnOnlyToggle", "#cnOnlyToggle2"].forEach(sel => { const el = $(sel); if (el && cn) el.checked = !!cn.checked; });
+    const r = await fetch("/api/config", { method: "PUT", headers: authHeaders(), body: JSON.stringify(cur) });
+    if (!r.ok) throw new Error("save");
+    const hint = $("#cnOnlyHint");
+    if (hint) {
+      hint.textContent = cur.cn_only
+        ? "已开启：只走国内。若只有 NVIDIA Key，请再贴一个魔搭/硅基 Key。"
+        : "未开启：仍会尝试海外模型（无 VPN 容易卡住）。";
+      hint.style.color = cur.cn_only ? "#86efac" : "var(--muted)";
+    }
+    if (!silent) toast(cur.cn_only ? "已开启国内模式" : "已关闭国内模式（将尝试海外渠道）");
+    return cur;
+  }catch(_){
+    if (!silent) toast("保存网络偏好失败", true);
+    return null;
   }
 }
 if ($("#novelPrefSelect")) $("#novelPrefSelect").onchange = () => saveAdvancedSettings();
@@ -406,6 +464,12 @@ if ($("#agentTeamsToggle")) $("#agentTeamsToggle").onchange = () => saveAdvanced
 if ($("#fastHedgeToggle")) $("#fastHedgeToggle").onchange = () => saveAdvancedSettings();
 if ($("#providerLimitToggle")) $("#providerLimitToggle").onchange = () => saveAdvancedSettings();
 if ($("#usageAsyncToggle")) $("#usageAsyncToggle").onchange = () => saveAdvancedSettings();
+if ($("#cnOnlyToggle2")) $("#cnOnlyToggle2").onchange = () => saveAdvancedSettings();
+if ($("#exposeUpstreamToggle2")) $("#exposeUpstreamToggle2").onchange = () => saveAdvancedSettings();
+if ($("#autoSyncWbToggle")) $("#autoSyncWbToggle").onchange = () => saveAdvancedSettings();
+if ($("#cnOnlyToggle")) $("#cnOnlyToggle").onchange = () => saveNetPrefs();
+if ($("#btnSaveNetPrefs")) $("#btnSaveNetPrefs").onclick = () => saveNetPrefs();
+if ($("#btnHomeSyncWb2")) $("#btnHomeSyncWb2").onclick = () => syncWorkBuddy();
 
 async function syncWorkBuddy(opts){
   const silent = !!(opts && opts.silent);
@@ -443,7 +507,7 @@ async function syncWorkBuddy(opts){
         const reload = j.hot_reload
           ? "WorkBuddy 正在运行，列表通常会自动刷新，不用改设置。"
           : "下次打开 WorkBuddy 即可直接选模型，不用填 URL / Key。";
-        toast("已同步 " + (j.count || 0) + " 个用途。" + keyLine + ideLine + "\n" + reload + "\n模型：" + names);
+        toast("已同步 " + (j.count || 0) + " 个用途。" + keyLine + ideLine + "\n" + reload + "\n模型：" + names + "\n对话时 WorkBuddy 会显示「日常 · 渠道/模型」");
       }
     }
     showRestartHints(j);
@@ -507,12 +571,18 @@ function displayApiKey(k){
 function normalizeProvider(p){
   const freeOnly = !!(p.free_only ?? p['free_only'] ?? p.freeOnly);
   const rawKey = p.api_key || "";
+  let tier = String(p.quota_tier || "").trim().toLowerCase();
+  if (!["daily", "signup", "free"].includes(tier)) {
+    tier = freeOnly && Number(p.weight ?? 1) <= 5 ? "free" : "daily";
+  }
   return {
     name: p.name || "unnamed",
     base_url: p.base_url || "",
     api_key: displayApiKey(rawKey),
     models: Array.isArray(p.models) ? p.models : [],
+    disabled_models: Array.isArray(p.disabled_models) ? p.disabled_models : [],
     free_only: freeOnly,
+    quota_tier: tier,
     weight: Number(p.weight ?? 1),
     enabled: p.enabled !== false,
   };
@@ -563,8 +633,17 @@ function renderHome(j){
   $("#statReady").textContent = String(ready.length);
   $("#statReadyHint").textContent = ready.length ? ready.join(" / ") : "还没有可用 Key";
   $("#statRoutes").textContent = String(Object.keys(routes).length);
-  $("#statCalls").textContent = String(ustat.client_requests ?? ustat.requests ?? usage.total ?? 0);
-  $("#statCallsHint").textContent = `上游 ${ustat.requests ?? usage.total ?? 0} 次 · 成功 ${ustat.ok ?? usage.ok ?? 0}`;
+  const last = j.last_chat || {};
+  const lastEl = $("#statLastUp");
+  const lastHint = $("#statLastUpHint");
+  if (lastEl) {
+    lastEl.textContent = last.display_model || (last.provider && last.upstream_model ? `${last.provider}/${last.upstream_model}` : "—");
+  }
+  if (lastHint) {
+    lastHint.textContent = last.latency_ms != null
+      ? `延迟 ${Math.round(last.latency_ms)} ms · 选「日常 · 大帅网关」即可`
+      : "发一次对话后这里会显示实际上游";
+  }
   $("#navVer").textContent = `v${j.version || "—"}`;
   if (window.__dashuaiSetAboutVersion) window.__dashuaiSetAboutVersion(j.version || "");
 
@@ -622,15 +701,29 @@ function renderHome(j){
   if (pl) pl.checked = j.config?.provider_concurrency_limit !== false;
   const ua = $("#usageAsyncToggle");
   if (ua) ua.checked = j.config?.usage_async_write !== false;
+  const cn = !!j.config?.cn_only;
+  const ex = j.config?.expose_upstream_model !== false;
+  const asw = j.config?.auto_sync_workbuddy !== false;
+  ["#cnOnlyToggle", "#cnOnlyToggle2"].forEach(sel => { const el = $(sel); if (el) el.checked = cn; });
+  ["#exposeUpstreamToggle2"].forEach(sel => { const el = $(sel); if (el) el.checked = ex; });
+  const asEl = $("#autoSyncWbToggle");
+  if (asEl) asEl.checked = asw;
+  const cnHint = $("#cnOnlyHint");
+  if (cnHint) {
+    cnHint.textContent = cn
+      ? "已开启：只走国内。若只有 NVIDIA Key，请再贴一个魔搭/硅基 Key。"
+      : "未开启：仍会尝试海外模型（无 VPN 容易卡住）。";
+    cnHint.style.color = cn ? "#86efac" : "var(--muted)";
+  }
   renderChips("#homeRoutes", routes);
   renderChips("#connRoutes", routes);
   $("#wbSnippet").value = wbSnippet(base, state.localKey);
 
   const steps = [
-    { done: ready.length > 0, title: "粘贴至少一个上游 API Key", tip: "工作台上方粘贴框 → 导入并启用", action: "去粘贴", page: "home" },
-    { done: !!j.config?.local_api_key_set, title: "确认本地网关 Key", tip: "右侧复制本地 Key 到客户端", action: "复制", page: "home" },
-    { done: Object.keys(routes).length > 0, title: "同步到本机客户端", tip: "点「同步到本机客户端」，不用去 WorkBuddy / Cursor 里改设置", action: "同步", page: "home", sync: true },
-    { done: (usage.total ?? 0) > 0, title: "发一次测试请求", tip: "客户端模型列表选「日常 · 大帅网关」随便问一句", action: "看用量", page: "home" },
+    { done: ready.length > 0, title: "粘贴至少一个上游 API Key", tip: "工作台粘贴框 →「导入并同步客户端」", action: "去粘贴", page: "home" },
+    { done: !!j.config?.cn_only || ready.some(n => !/nvidia|gemini|openrouter|groq/i.test(String(n||""))), title: "国内模式（无 VPN）", tip: "勾选「仅使用国内渠道」；只贴魔搭会自动开启", action: "去开", page: "home" },
+    { done: Object.keys(routes).length > 0, title: "同步到本机客户端", tip: "导入并同步，或点顶栏「同步到本机客户端」", action: "同步", page: "home", sync: true },
+    { done: (usage.total ?? 0) > 0 || !!(j.last_chat && j.last_chat.display_model), title: "发一次测试请求", tip: "客户端选「日常 · 大帅网关」随便问一句", action: "看用量", page: "home" },
   ];
   const doneCount = steps.filter(s => s.done).length;
   $$("#wizardBar .wstep").forEach(el => {
@@ -973,12 +1066,14 @@ function renderProviders(){
     const ready = p.enabled && hasKey && (p.models || []).length > 0;
     const open = state.openProvider === i ? "open" : "";
     const statusChip = ready ? "可用" : (!hasKey ? "缺 API Key" : (!p.enabled ? "未启用" : "待配置"));
+    const tierLabel = ({daily:"日额度优先", signup:"注册赠送", free:"免费兜底"})[p.quota_tier] || "日额度优先";
     return `<div class="provider ${open}" data-idx="${i}">
       <div class="provider-head" data-toggle="${i}">
         <div>
           <strong>${esc(p.name || "未命名")}</strong>
           <div class="provider-meta">
             <span class="chip ${ready ? "ok" : "bad"}">${statusChip}</span>
+            <span class="chip">${tierLabel}</span>
             <span class="chip">${p.enabled ? "已启用" : "已关闭"}</span>
             <span class="chip">权重 ${p.weight ?? 1}</span>
           </div>
@@ -996,6 +1091,13 @@ function renderProviders(){
         <div class="field"><label>模型列表（逗号分隔）</label><input data-f="models" data-i="${i}" value="${esc((p.models || []).join(", "))}" /></div>
         <div class="inline">
           <div class="field" style="flex:1;margin:0"><label>权重</label><input data-f="weight" data-i="${i}" type="number" value="${p.weight ?? 1}" /></div>
+          <div class="field" style="flex:1.4;margin:0"><label>额度档</label>
+            <select data-f="quota_tier" data-i="${i}">
+              <option value="daily" ${(p.quota_tier||"daily")==="daily"?"selected":""}>日额度（优先）</option>
+              <option value="signup" ${p.quota_tier==="signup"?"selected":""}>注册赠送</option>
+              <option value="free" ${p.quota_tier==="free"?"selected":""}>免费池（兜底）</option>
+            </select>
+          </div>
           <label class="switch" style="margin-top:18px"><input type="checkbox" data-f="free_only" data-i="${i}" ${p.free_only ? "checked" : ""}/>仅免费</label>
           <button class="btn btn-danger btn-sm" type="button" data-del="${i}" style="margin-top:18px">删除</button>
         </div>
@@ -1492,19 +1594,24 @@ document.addEventListener("visibilitychange", () => {
 
 /* === CHANNEL_PRESET_PICKER === */
 const CHANNEL_PRESETS = [
-  // 顺序与 data/providers.example.json 对齐（2026-08-22 实测校准）
-  {id:"ModelScope", name:"ModelScope", region:"cn", note:"魔搭：国内直连，含识图 VL", signup:"https://modelscope.cn/my/myaccesstoken", base_url:"https://api-inference.modelscope.cn/v1", models:["Qwen/Qwen3.5-397B-A17B", "Qwen/Qwen3-235B-A22B-Instruct-2507", "deepseek-ai/DeepSeek-V4-Pro", "deepseek-ai/DeepSeek-V4-Flash-0731", "Qwen/Qwen3.5-122B-A10B", "Qwen/Qwen3.5-27B", "Qwen/Qwen3-Coder-30B-A3B-Instruct", "Qwen/Qwen3-VL-235B-A22B-Instruct", "Qwen/Qwen3-VL-8B-Instruct", "Qwen/Qwen3-8B"], free_only:true, weight:10, defaultOn:true},
-  {id:"SiliconFlow", name:"SiliconFlow", region:"cn", note:"硅基：需账户余额；已换成当前小杯/常用 ID", signup:"https://cloud.siliconflow.cn/account/ak", base_url:"https://api.siliconflow.cn/v1", models:["Qwen/Qwen3.5-9B", "Qwen/Qwen3.5-4B", "Qwen/Qwen3-8B", "THUDM/GLM-4-9B-0414", "Qwen/Qwen2.5-7B-Instruct", "deepseek-ai/DeepSeek-V3"], free_only:true, weight:9, defaultOn:true},
-  {id:"Zhipu", name:"Zhipu", region:"cn", note:"智谱：整段 API Key（id.secret）；已加 glm-5.x", signup:"https://open.bigmodel.cn/usercenter/apikeys", base_url:"https://open.bigmodel.cn/api/paas/v4", models:["glm-5.2", "glm-5.1", "glm-5", "glm-4.7", "glm-4.6", "glm-4.5", "glm-4.7-flash", "glm-4.5-flash"], free_only:true, weight:8, defaultOn:true},
-  {id:"SenseNova", name:"SenseNova", region:"cn", note:"商汤 Token Plan：必须用 token.sensenova.cn（旧 api.sensenova.cn 会 403）", signup:"https://console.sensenova.cn/", base_url:"https://token.sensenova.cn/v1", models:["sensenova-6.8-flash-lite", "sensenova-6.7-flash-lite", "deepseek-v4-flash", "glm-5.2"], free_only:true, weight:9, defaultOn:true},
-  {id:"Doubao", name:"豆包(火山方舟)", region:"cn", note:"火山方舟 OpenAI 兼容；控制台「推理接入点」创建后，模型名填接入点 ID（ep- 开头）或下方示例 ID；新用户有免费 Token", signup:"https://console.volcengine.com/ark/region:ark+cn-beijing/openManagement", base_url:"https://ark.cn-beijing.volces.com/api/v3", models:["doubao-seed-1-6-251015", "doubao-lite-32k-240828", "doubao-seed-1-8-251228"], free_only:true, weight:10, defaultOn:true},
-  {id:"Hunyuan", name:"混元(元宝API)", region:"cn", note:"腾讯云混元，与元宝同底层；控制台申请 sk- 开头 Key；hunyuan-lite 有免费额度", signup:"https://console.cloud.tencent.com/hunyuan/api-key", base_url:"https://api.hunyuan.cloud.tencent.com/v1", models:["hunyuan-turbos-latest", "hunyuan-lite", "hunyuan-turbo"], free_only:true, weight:9, defaultOn:true},
-  {id:"NVIDIA", name:"NVIDIA", region:"vpn", note:"NVIDIA NIM：含视觉；建议 VPN", signup:"https://build.nvidia.com/", base_url:"https://integrate.api.nvidia.com/v1", models:["nvidia/nemotron-3-super-120b-a12b", "nvidia/llama-3.3-nemotron-super-49b-v1", "meta/llama-3.3-70b-instruct", "meta/llama-3.1-8b-instruct", "meta/llama-3.2-11b-vision-instruct", "nvidia/nemotron-nano-12b-v2-vl"], free_only:true, weight:10, defaultOn:true},
-  {id:"Groq", name:"Groq", region:"vpn", note:"Groq：需 VPN；旧 llama/qwen ID 已下架", signup:"https://console.groq.com/keys", base_url:"https://api.groq.com/openai/v1", models:["openai/gpt-oss-120b", "openai/gpt-oss-20b", "groq/compound", "allam-2-7b"], free_only:true, weight:9, defaultOn:false},
-  {id:"Gemini", name:"Gemini", region:"vpn", note:"Gemini：flash-latest / 3.x；pro-latest 易触配额", signup:"https://aistudio.google.com/apikey", base_url:"https://generativelanguage.googleapis.com/v1beta/openai/", models:["gemini-flash-latest", "gemini-3-flash-preview", "gemini-3.1-flash-lite-preview", "gemini-2.5-flash"], free_only:true, weight:9, defaultOn:false},
-  {id:"Cerebras", name:"Cerebras", region:"vpn", note:"Cerebras：需 VPN；旧 llama/qwen ID 已下架；部分模型要付费", signup:"https://cloud.cerebras.ai/", base_url:"https://api.cerebras.ai/v1", models:["gemma-4-31b", "gpt-oss-120b"], free_only:true, weight:8, defaultOn:false},
-  {id:"OpenRouter", name:"OpenRouter", region:"vpn", note:"OpenRouter：用当前 :free；旧 glm-5.1:free / lfm-1.2b 已失效", signup:"https://openrouter.ai/keys", base_url:"https://openrouter.ai/api/v1", models:["openrouter/free", "z-ai/glm-5.2:free", "google/gemma-4-31b-it:free", "nvidia/nemotron-3-nano-30b-a3b:free", "nvidia/nemotron-3-super-120b-a12b:free", "liquid/lfm-2.5-2.6b:free"], free_only:true, weight:7, defaultOn:false},
-  {id:"Mistral", name:"Mistral", region:"vpn", note:"Mistral：需 VPN；保留当前可用 small/ministral", signup:"https://console.mistral.ai/api-keys/", base_url:"https://api.mistral.ai/v1", models:["mistral-small-latest", "mistral-small-2603", "magistral-small-latest", "ministral-8b-latest", "open-mistral-nemo"], free_only:true, weight:6, defaultOn:false},
+  // 顺序：日额度/赠送优先，免费池靠后（与 providers.example.json 对齐）
+  {id:"ModelScope", name:"ModelScope", region:"cn", note:"魔搭：国内直连日额度，含大杯+识图 VL", signup:"https://modelscope.cn/my/myaccesstoken", base_url:"https://api-inference.modelscope.cn/v1", models:["Qwen/Qwen3.5-397B-A17B", "Qwen/Qwen3-235B-A22B-Instruct-2507", "deepseek-ai/DeepSeek-V4-Pro", "deepseek-ai/DeepSeek-V4-Flash-0731", "Qwen/Qwen3.5-122B-A10B", "Qwen/Qwen3.5-27B", "Qwen/Qwen3-Coder-30B-A3B-Instruct", "Qwen/Qwen3-VL-235B-A22B-Instruct", "Qwen/Qwen3-VL-8B-Instruct", "Qwen/Qwen3-8B"], free_only:true, quota_tier:"daily", weight:12, defaultOn:true},
+  {id:"DashScope", name:"千问AI(DashScope)", region:"cn", note:"千问AI平台新人免费额度（宣传约1亿Token，各模型独立约100万、约90天）；须用通用 API Key（sk-），勿用 Token Plan 的 sk-sp-；建议权益页开启「用尽即停」", signup:"https://platform.qianwenai.com/home/", base_url:"https://dashscope.aliyuncs.com/compatible-mode/v1", models:["qwen3.8-max", "qwen3.7-plus", "qwen3.6-plus", "qwen3.5-plus", "qwen3.5-flash", "qwen-plus", "qwen-flash", "qwen-vl-plus", "deepseek-v4-flash", "deepseek-v4-pro", "glm-5.2"], free_only:true, quota_tier:"signup", weight:13, defaultOn:true},
+  {id:"Zhipu", name:"Zhipu", region:"cn", note:"智谱：整段 API Key（id.secret）；Flash 有免费额度", signup:"https://open.bigmodel.cn/usercenter/apikeys", base_url:"https://open.bigmodel.cn/api/paas/v4", models:["glm-5.2", "glm-5.1", "glm-5", "glm-4.7", "glm-4.6", "glm-4.5", "glm-4.7-flash", "glm-4.5-flash"], free_only:true, quota_tier:"daily", weight:11, defaultOn:true},
+  {id:"SenseNova", name:"SenseNova", region:"cn", note:"商汤 Token Plan：必须用 token.sensenova.cn", signup:"https://console.sensenova.cn/", base_url:"https://token.sensenova.cn/v1", models:["sensenova-6.8-flash-lite", "sensenova-6.7-flash-lite", "deepseek-v4-flash", "glm-5.2"], free_only:true, quota_tier:"daily", weight:10, defaultOn:true},
+  {id:"Doubao", name:"豆包(火山方舟)", region:"cn", note:"火山方舟；模型名填接入点 ID（ep-）或示例 ID；新用户有免费 Token", signup:"https://console.volcengine.com/ark/region:ark+cn-beijing/openManagement", base_url:"https://ark.cn-beijing.volces.com/api/v3", models:["doubao-seed-1-6-251015", "doubao-lite-32k-240828", "doubao-seed-1-8-251228"], free_only:true, quota_tier:"signup", weight:11, defaultOn:true},
+  {id:"Hunyuan", name:"混元(元宝API)", region:"cn", note:"腾讯云混元；hunyuan-lite 有免费额度", signup:"https://console.cloud.tencent.com/hunyuan/api-key", base_url:"https://api.hunyuan.cloud.tencent.com/v1", models:["hunyuan-turbos-latest", "hunyuan-lite", "hunyuan-turbo"], free_only:true, quota_tier:"signup", weight:10, defaultOn:true},
+  {id:"NVIDIA", name:"NVIDIA", region:"vpn", note:"NVIDIA NIM 日额度；含视觉；建议 VPN", signup:"https://build.nvidia.com/", base_url:"https://integrate.api.nvidia.com/v1", models:["minimaxai/minimax-m3", "nvidia/nemotron-3-super-120b-a12b", "nvidia/llama-3.3-nemotron-super-49b-v1", "meta/llama-3.3-70b-instruct", "meta/llama-3.1-8b-instruct", "meta/llama-3.2-11b-vision-instruct", "nvidia/nemotron-nano-12b-v2-vl"], free_only:true, quota_tier:"daily", weight:12, defaultOn:true},
+  {id:"Gemini", name:"Gemini", region:"vpn", note:"Google AI Studio 日额度最高档之一；建议 VPN", signup:"https://aistudio.google.com/apikey", base_url:"https://generativelanguage.googleapis.com/v1beta/openai/", models:["gemini-flash-latest", "gemini-3-flash-preview", "gemini-3.1-flash-lite-preview", "gemini-2.5-flash"], free_only:true, quota_tier:"daily", weight:12, defaultOn:false},
+  {id:"Groq", name:"Groq", region:"vpn", note:"Groq 日额度；极速；需 VPN", signup:"https://console.groq.com/keys", base_url:"https://api.groq.com/openai/v1", models:["openai/gpt-oss-120b", "openai/gpt-oss-20b", "groq/compound", "allam-2-7b"], free_only:true, quota_tier:"daily", weight:10, defaultOn:false},
+  {id:"Cerebras", name:"Cerebras", region:"vpn", note:"Cerebras 日额度；极速；需 VPN", signup:"https://cloud.cerebras.ai/", base_url:"https://api.cerebras.ai/v1", models:["gemma-4-31b", "gpt-oss-120b"], free_only:true, quota_tier:"daily", weight:10, defaultOn:false},
+  {id:"HuggingFace", name:"HuggingFace", region:"vpn", note:"HF Router 月度小额免费推理额度", signup:"https://huggingface.co/settings/tokens", base_url:"https://router.huggingface.co/v1", models:["Qwen/Qwen2.5-72B-Instruct", "meta-llama/Llama-3.3-70B-Instruct", "Qwen/Qwen2.5-Coder-32B-Instruct", "google/gemma-3-27b-it"], free_only:true, quota_tier:"signup", weight:9, defaultOn:false},
+  {id:"Cloudflare", name:"Cloudflare", region:"vpn", note:"Workers AI 每日 10k Neurons；Base URL 里把 YOUR_ACCOUNT_ID 换成账号 ID", signup:"https://dash.cloudflare.com/", base_url:"https://api.cloudflare.com/client/v4/accounts/YOUR_ACCOUNT_ID/ai/v1", models:["@cf/meta/llama-3.3-70b-instruct-fp8-fast", "@cf/meta/llama-4-scout-17b-16e-instruct", "@cf/openai/gpt-oss-120b", "@cf/google/gemma-4-26b-a4b-it", "@cf/zai-org/glm-4.7-flash"], free_only:true, quota_tier:"daily", weight:9, defaultOn:false},
+  {id:"SiliconFlow", name:"SiliconFlow", region:"cn", note:"硅基免费小杯（兜底）；强模型需余额", signup:"https://cloud.siliconflow.cn/account/ak", base_url:"https://api.siliconflow.cn/v1", models:["Qwen/Qwen3.5-9B", "Qwen/Qwen3.5-4B", "Qwen/Qwen3-8B", "THUDM/GLM-4-9B-0414", "Qwen/Qwen2.5-7B-Instruct", "deepseek-ai/DeepSeek-V3"], free_only:true, quota_tier:"free", weight:5, defaultOn:false},
+  {id:"OpenRouter", name:"OpenRouter", region:"vpn", note:"OpenRouter :free 池（兜底，日限约50次）", signup:"https://openrouter.ai/keys", base_url:"https://openrouter.ai/api/v1", models:["openrouter/free", "z-ai/glm-5.2:free", "google/gemma-4-31b-it:free", "nvidia/nemotron-3-nano-30b-a3b:free", "nvidia/nemotron-3-super-120b-a12b:free", "liquid/lfm-2.5-2.6b:free"], free_only:true, quota_tier:"free", weight:4, defaultOn:false},
+  {id:"Kilo", name:"Kilo", region:"vpn", note:"Kilo 免费模型池（兜底）", signup:"https://app.kilo.ai/profile", base_url:"https://api.kilo.ai/api/gateway", models:["nvidia/nemotron-3-super-120b-a12b:free", "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free", "openrouter/free", "liquid/lfm-2.5-2.6b:free"], free_only:true, quota_tier:"free", weight:4, defaultOn:false},
+  {id:"LLM7", name:"LLM7", region:"vpn", note:"LLM7 免费额度（兜底，稳定性一般）", signup:"https://token.llm7.io", base_url:"https://api.llm7.io/v1", models:["gpt-oss:20b", "mistral-Nemo-Instruct-2407", "minimax-m2.7"], free_only:true, quota_tier:"free", weight:3, defaultOn:false},
+  {id:"Mistral", name:"Mistral", region:"vpn", note:"Mistral 月度赠送额度；需 VPN", signup:"https://console.mistral.ai/api-keys/", base_url:"https://api.mistral.ai/v1", models:["mistral-small-latest", "mistral-small-2603", "magistral-small-latest", "ministral-8b-latest", "open-mistral-nemo"], free_only:true, quota_tier:"signup", weight:7, defaultOn:false},
 ];
 
 async function rebuildSmartRoutes(showToast=true){
@@ -1515,7 +1622,7 @@ async function rebuildSmartRoutes(showToast=true){
   if (typeof renderRoutes === "function") renderRoutes();
   if (showToast) {
     const n = (j.summary || []).length;
-    toast("已按日志重建 " + n + " 类路由（每类最多10个：成功率+准确度+速度）");
+    toast("已按日志重建 " + n + " 类路由（日额度/强模型优先，免费小杯兜底）");
   }
   return j;
 }
@@ -1629,13 +1736,23 @@ function setPresetFilter(region){
 }
 
 function upsertPresetChannel(list, preset){
-  const i = findProviderIndex(list, preset.name);
+  const aliases = {
+    "千问AI(DashScope)": ["千问AI(DashScope)", "百炼(DashScope)", "DashScope", "阿里云百炼"],
+  };
+  let i = findProviderIndex(list, preset.name);
+  if (i < 0) {
+    for (const a of (aliases[preset.name] || [])) {
+      i = findProviderIndex(list, a);
+      if (i >= 0) break;
+    }
+  }
   const shell = normalizeProvider({
     name: preset.name,
     base_url: preset.base_url,
     api_key: "",
     models: (preset.models || []).slice(),
     free_only: !!preset.free_only,
+    quota_tier: preset.quota_tier || "daily",
     weight: preset.weight ?? 1,
     enabled: false,
   });
@@ -1646,7 +1763,8 @@ function upsertPresetChannel(list, preset){
   // 重新部署时刷新模型列表（保留已有 Key / 启用状态）
   cur.models = (preset.models || []).slice();
   cur.free_only = !!preset.free_only;
-  if (cur.weight == null) cur.weight = preset.weight ?? 1;
+  cur.quota_tier = preset.quota_tier || cur.quota_tier || "daily";
+  cur.weight = preset.weight ?? cur.weight ?? 1;
   return "updated";
 }
 
@@ -2266,6 +2384,7 @@ state.routeFilter = state.routeFilter || "";
     }
     state.license = snap;
     paintAccount(snap);
+    if (typeof paintHomeLicenseCard === "function") paintHomeLicenseCard(snap);
     if (snap && snap.logged_in) loadUsageHistory();
   }
   window.paintLicense = paintLicense;
