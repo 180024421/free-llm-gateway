@@ -642,9 +642,32 @@ async def put_config(request: Request, _: None = Depends(_auth)) -> dict[str, An
         "license_reserve_tokens",
         "bill_estimated_usage",
         "license_allow_insecure_http",
+        "cn_only",
+        "expose_upstream_model",
+        "auto_sync_workbuddy",
     ):
         if key in body:
-            cfg[key] = body[key]
+            val = body[key]
+            if key in {
+                "cn_only",
+                "expose_upstream_model",
+                "auto_sync_workbuddy",
+                "workbuddy_enable_agent_teams",
+                "fast_hedged_requests",
+                "fast_hedge_with_tools",
+                "provider_concurrency_limit",
+                "usage_async_write",
+                "encrypt_provider_keys",
+                "encrypt_session",
+                "bill_estimated_usage",
+                "license_allow_insecure_http",
+                "novel_fallback_daily",
+            }:
+                if isinstance(val, str):
+                    val = val.strip().lower() in {"1", "true", "yes", "on"}
+                else:
+                    val = bool(val)
+            cfg[key] = val
     # Commercial builds refuse to turn off license via API.
     try:
         from .commercial import is_commercial_build
@@ -672,6 +695,9 @@ async def put_providers(request: Request, _: None = Depends(_auth)) -> dict[str,
     for item in body:
         if not isinstance(item, dict):
             continue
+        tier = str(item.get("quota_tier") or "").strip().lower()
+        if tier not in {"daily", "signup", "free"}:
+            tier = "daily" if bool(item.get("free_only", False)) else "signup"
         cleaned.append(
             {
                 "name": item.get("name") or "unnamed",
@@ -680,6 +706,7 @@ async def put_providers(request: Request, _: None = Depends(_auth)) -> dict[str,
                 "models": item.get("models") or [],
                 "disabled_models": item.get("disabled_models") or [],
                 "free_only": bool(item.get("free_only", False)),
+                "quota_tier": tier,
                 "weight": item.get("weight", 1),
                 "enabled": bool(item.get("enabled", True)),
             }
@@ -689,7 +716,19 @@ async def put_providers(request: Request, _: None = Depends(_auth)) -> dict[str,
         rebuild_and_save()
     except Exception:
         pass
-    return {"status": "saved", "count": len(cleaned), "routes_rebuilt": True}
+    synced = None
+    try:
+        cfg = load_config()
+        if bool(cfg.get("auto_sync_workbuddy", True)):
+            synced = sync_workbuddy(auto=True)
+    except Exception as exc:  # noqa: BLE001
+        synced = {"ok": False, "error": str(exc)}
+    return {
+        "status": "saved",
+        "count": len(cleaned),
+        "routes_rebuilt": True,
+        "workbuddy_sync": synced,
+    }
 
 
 @app.get("/api/routers")
@@ -818,6 +857,16 @@ async def _chat_completions_inner(request: Request):
         raise HTTPException(status_code=400, detail="JSON body required")
 
     client_model = str(body.get("model") or "daily")
+    try:
+        from .meta import strip_route_display
+
+        stripped = strip_route_display(client_model)
+        if stripped != client_model:
+            client_model = stripped
+            body = dict(body)
+            body["model"] = client_model
+    except Exception:
+        pass
     stream = bool(body.get("stream"))
     timeout = float(cfg.get("request_timeout_sec") or 120)
     max_retries = int(cfg.get("max_retries_per_request") or 3)
@@ -891,10 +940,27 @@ async def _chat_completions_inner(request: Request):
 
     candidates = resolve_candidates(client_model, providers, routers)
     if not candidates:
-        raise HTTPException(
-            status_code=503,
-            detail="No upstream candidate. Fill providers API keys in the UI or data/providers.json.",
-        )
+        cn_only = bool(cfg.get("cn_only", False))
+        ready_names = [
+            str(p.get("name") or "?")
+            for p in providers
+            if p.get("enabled", True)
+            and str(p.get("api_key") or "").strip()
+            and not str(p.get("api_key") or "").startswith("REPLACE_")
+        ]
+        if cn_only:
+            detail = (
+                "国内模式已开启，但没有可用的国内上游。"
+                "请粘贴魔搭(ms-)或硅基/千问等国内 Key；"
+                f"当前已启用渠道：{', '.join(ready_names) or '无'}。"
+                "若要用 NVIDIA，请先关闭工作台「仅使用国内渠道」。"
+            )
+        else:
+            detail = (
+                "没有可用上游。请到工作台粘贴 API Key 并点「导入并同步客户端」。"
+                f"当前已启用：{', '.join(ready_names) or '无'}。"
+            )
+        raise HTTPException(status_code=503, detail=detail)
 
     errors: list[dict[str, Any]] = []
     tried: set[tuple[str, str]] = set()

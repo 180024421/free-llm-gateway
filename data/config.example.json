@@ -99,7 +99,13 @@
 
   "license_reserve_tokens": 128,
 
-  "bill_estimated_usage": true
+  "bill_estimated_usage": true,
+
+  "cn_only": true,
+
+  "expose_upstream_model": true,
+
+  "auto_sync_workbuddy": true
 
 }
 

@@ -60,10 +60,23 @@ def _provider_ready(p: dict[str, Any]) -> bool:
 
 def _probe_targets(providers: list[dict[str, Any]] | None = None) -> list[tuple[dict[str, Any], str]]:
     providers = providers if providers is not None else load_providers()
+    cn_only = False
+    try:
+        cn_only = bool(load_config().get("cn_only", False))
+    except Exception:
+        cn_only = False
     out: list[tuple[dict[str, Any], str]] = []
     for p in providers:
         if not _provider_ready(p):
             continue
+        if cn_only:
+            try:
+                from .commercial import is_overseas_provider
+
+                if is_overseas_provider(str(p.get("base_url") or ""), str(p.get("name") or "")):
+                    continue
+            except Exception:
+                pass
         for m in p.get("models") or []:
             model = str(m).strip()
             if not model or is_non_chat_model(model):

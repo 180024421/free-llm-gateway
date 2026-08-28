@@ -170,6 +170,14 @@ def enforce_commercial_config(cfg: dict[str, Any] | None = None) -> dict[str, An
 
 def provider_region_boost(base_url: str, provider_name: str = "") -> float:
     """Slight preference for domestic endpoints until latency history exists."""
+    if is_cn_provider(base_url, provider_name):
+        return 1.12
+    if is_overseas_provider(base_url, provider_name):
+        return 0.92
+    return 1.0
+
+
+def is_cn_provider(base_url: str = "", provider_name: str = "") -> bool:
     low = f"{base_url} {provider_name}".lower()
     cn_hints = (
         "modelscope",
@@ -182,18 +190,53 @@ def provider_region_boost(base_url: str, provider_name: str = "") -> float:
         "tencent",
         "aliyun",
         "dashscope",
+        "qianwen",
         "deepseek.com",
         "moonshot",
         "baichuan",
         "minimax",
         "zhipu",
+        "ark.cn",
+        "豆包",
+        "混元",
+        "千问",
+        "智谱",
     )
-    vpn_hints = ("nvidia.com", "groq.com", "googleapis.com", "openai.com", "anthropic.com", "together.xyz")
-    if any(h in low for h in cn_hints):
-        return 1.12
-    if any(h in low for h in vpn_hints):
-        return 0.92
-    return 1.0
+    return any(h in low for h in cn_hints)
+
+
+def is_overseas_provider(base_url: str = "", provider_name: str = "") -> bool:
+    """True for VPN/海外 endpoints that often hang without proxy."""
+    if is_cn_provider(base_url, provider_name):
+        return False
+    low = f"{base_url} {provider_name}".lower()
+    vpn_hints = (
+        "nvidia.com",
+        "groq.com",
+        "googleapis.com",
+        "generativelanguage",
+        "openai.com",
+        "anthropic.com",
+        "together.xyz",
+        "openrouter.ai",
+        "cerebras.ai",
+        "cloudflare.com",
+        "huggingface.co",
+        "hf.co",
+        "kilo.ai",
+        "llm7.io",
+        "mistral.ai",
+        "fireworks.ai",
+        "sambanova",
+        "gemini",
+        "groq",
+        "cerebras",
+        "openrouter",
+        "cloudflare",
+        "huggingface",
+        "nvidia",
+    )
+    return any(h in low for h in vpn_hints)
 
 
 def unify_local_api_key(data_dir: Path | None = None) -> str | None:

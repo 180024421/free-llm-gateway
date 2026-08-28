@@ -165,8 +165,16 @@ def provider_is_ready(p: dict[str, Any]) -> bool:
 
 
 def overview_payload(base_url: str) -> dict[str, Any]:
+    from .state import STATE
+
     cfg, providers, routers = reload_all()
     ready = [p for p in providers if provider_is_ready(p)]
+    last = None
+    try:
+        with STATE.lock:
+            last = dict(STATE.last_chat) if STATE.last_chat else None
+    except Exception:
+        last = None
     return {
         "ok": True,
         "ts": time.time(),
@@ -188,7 +196,11 @@ def overview_payload(base_url: str) -> dict[str, Any]:
             "usage_async_write": bool(cfg.get("usage_async_write", True)),
             "request_timeout_sec": cfg.get("request_timeout_sec"),
             "max_retries_per_request": cfg.get("max_retries_per_request"),
+            "cn_only": bool(cfg.get("cn_only", False)),
+            "expose_upstream_model": bool(cfg.get("expose_upstream_model", True)),
+            "auto_sync_workbuddy": bool(cfg.get("auto_sync_workbuddy", True)),
         },
+        "last_chat": last,
         "providers": [
             {
                 "name": p.get("name"),

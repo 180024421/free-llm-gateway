@@ -17,24 +17,31 @@
     ],
     "disabled_models": [],
     "free_only": true,
-    "weight": 10,
+    "quota_tier": "daily",
+    "weight": 12,
     "enabled": false
   },
   {
-    "name": "SiliconFlow",
-    "base_url": "https://api.siliconflow.cn/v1",
+    "name": "千问AI(DashScope)",
+    "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
     "api_key": "",
     "models": [
-      "Qwen/Qwen3.5-9B",
-      "Qwen/Qwen3.5-4B",
-      "Qwen/Qwen3-8B",
-      "THUDM/GLM-4-9B-0414",
-      "Qwen/Qwen2.5-7B-Instruct",
-      "deepseek-ai/DeepSeek-V3"
+      "qwen3.8-max",
+      "qwen3.7-plus",
+      "qwen3.6-plus",
+      "qwen3.5-plus",
+      "qwen3.5-flash",
+      "qwen-plus",
+      "qwen-flash",
+      "qwen-vl-plus",
+      "deepseek-v4-flash",
+      "deepseek-v4-pro",
+      "glm-5.2"
     ],
     "disabled_models": [],
     "free_only": true,
-    "weight": 9,
+    "quota_tier": "signup",
+    "weight": 13,
     "enabled": false
   },
   {
@@ -53,7 +60,8 @@
     ],
     "disabled_models": [],
     "free_only": true,
-    "weight": 8,
+    "quota_tier": "daily",
+    "weight": 11,
     "enabled": false
   },
   {
@@ -68,7 +76,38 @@
     ],
     "disabled_models": [],
     "free_only": true,
-    "weight": 9,
+    "quota_tier": "daily",
+    "weight": 10,
+    "enabled": false
+  },
+  {
+    "name": "豆包(火山方舟)",
+    "base_url": "https://ark.cn-beijing.volces.com/api/v3",
+    "api_key": "",
+    "models": [
+      "doubao-seed-1-6-251015",
+      "doubao-lite-32k-240828",
+      "doubao-seed-1-8-251228"
+    ],
+    "disabled_models": [],
+    "free_only": true,
+    "quota_tier": "signup",
+    "weight": 11,
+    "enabled": false
+  },
+  {
+    "name": "混元(元宝API)",
+    "base_url": "https://api.hunyuan.cloud.tencent.com/v1",
+    "api_key": "",
+    "models": [
+      "hunyuan-turbos-latest",
+      "hunyuan-lite",
+      "hunyuan-turbo"
+    ],
+    "disabled_models": [],
+    "free_only": true,
+    "quota_tier": "signup",
+    "weight": 10,
     "enabled": false
   },
   {
@@ -86,22 +125,8 @@
     ],
     "disabled_models": [],
     "free_only": true,
-    "weight": 10,
-    "enabled": false
-  },
-  {
-    "name": "Groq",
-    "base_url": "https://api.groq.com/openai/v1",
-    "api_key": "",
-    "models": [
-      "openai/gpt-oss-120b",
-      "openai/gpt-oss-20b",
-      "groq/compound",
-      "allam-2-7b"
-    ],
-    "disabled_models": [],
-    "free_only": true,
-    "weight": 9,
+    "quota_tier": "daily",
+    "weight": 12,
     "enabled": false
   },
   {
@@ -116,7 +141,24 @@
     ],
     "disabled_models": [],
     "free_only": true,
-    "weight": 9,
+    "quota_tier": "daily",
+    "weight": 12,
+    "enabled": false
+  },
+  {
+    "name": "Groq",
+    "base_url": "https://api.groq.com/openai/v1",
+    "api_key": "",
+    "models": [
+      "openai/gpt-oss-120b",
+      "openai/gpt-oss-20b",
+      "groq/compound",
+      "allam-2-7b"
+    ],
+    "disabled_models": [],
+    "free_only": true,
+    "quota_tier": "daily",
+    "weight": 10,
     "enabled": false
   },
   {
@@ -129,7 +171,59 @@
     ],
     "disabled_models": [],
     "free_only": true,
-    "weight": 8,
+    "quota_tier": "daily",
+    "weight": 10,
+    "enabled": false
+  },
+  {
+    "name": "HuggingFace",
+    "base_url": "https://router.huggingface.co/v1",
+    "api_key": "",
+    "models": [
+      "Qwen/Qwen2.5-72B-Instruct",
+      "meta-llama/Llama-3.3-70B-Instruct",
+      "Qwen/Qwen2.5-Coder-32B-Instruct",
+      "google/gemma-3-27b-it"
+    ],
+    "disabled_models": [],
+    "free_only": true,
+    "quota_tier": "signup",
+    "weight": 9,
+    "enabled": false
+  },
+  {
+    "name": "Cloudflare",
+    "base_url": "https://api.cloudflare.com/client/v4/accounts/YOUR_ACCOUNT_ID/ai/v1",
+    "api_key": "",
+    "models": [
+      "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+      "@cf/meta/llama-4-scout-17b-16e-instruct",
+      "@cf/openai/gpt-oss-120b",
+      "@cf/google/gemma-4-26b-a4b-it",
+      "@cf/zai-org/glm-4.7-flash"
+    ],
+    "disabled_models": [],
+    "free_only": true,
+    "quota_tier": "daily",
+    "weight": 9,
+    "enabled": false
+  },
+  {
+    "name": "SiliconFlow",
+    "base_url": "https://api.siliconflow.cn/v1",
+    "api_key": "",
+    "models": [
+      "Qwen/Qwen3.5-9B",
+      "Qwen/Qwen3.5-4B",
+      "Qwen/Qwen3-8B",
+      "THUDM/GLM-4-9B-0414",
+      "Qwen/Qwen2.5-7B-Instruct",
+      "deepseek-ai/DeepSeek-V3"
+    ],
+    "disabled_models": [],
+    "free_only": true,
+    "quota_tier": "free",
+    "weight": 5,
     "enabled": false
   },
   {
@@ -146,7 +240,39 @@
     ],
     "disabled_models": [],
     "free_only": true,
-    "weight": 7,
+    "quota_tier": "free",
+    "weight": 4,
+    "enabled": false
+  },
+  {
+    "name": "Kilo",
+    "base_url": "https://api.kilo.ai/api/gateway",
+    "api_key": "",
+    "models": [
+      "nvidia/nemotron-3-super-120b-a12b:free",
+      "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+      "openrouter/free",
+      "liquid/lfm-2.5-2.6b:free"
+    ],
+    "disabled_models": [],
+    "free_only": true,
+    "quota_tier": "free",
+    "weight": 4,
+    "enabled": false
+  },
+  {
+    "name": "LLM7",
+    "base_url": "https://api.llm7.io/v1",
+    "api_key": "",
+    "models": [
+      "gpt-oss:20b",
+      "mistral-Nemo-Instruct-2407",
+      "minimax-m2.7"
+    ],
+    "disabled_models": [],
+    "free_only": true,
+    "quota_tier": "free",
+    "weight": 3,
     "enabled": false
   },
   {
@@ -162,7 +288,8 @@
     ],
     "disabled_models": [],
     "free_only": true,
-    "weight": 6,
+    "quota_tier": "signup",
+    "weight": 7,
     "enabled": false
   }
 ]

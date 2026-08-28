@@ -8,6 +8,13 @@ from .state import STATE
 
 
 def _enabled_providers(providers: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    from .config import load_config
+
+    cn_only = False
+    try:
+        cn_only = bool(load_config().get("cn_only", False))
+    except Exception:
+        cn_only = False
     out = []
     for p in providers:
         if not p.get("enabled", True):
@@ -18,6 +25,14 @@ def _enabled_providers(providers: list[dict[str, Any]]) -> list[dict[str, Any]]:
         models = p.get("models") or []
         if not models:
             continue
+        if cn_only:
+            try:
+                from .commercial import is_overseas_provider
+
+                if is_overseas_provider(str(p.get("base_url") or ""), str(p.get("name") or "")):
+                    continue
+            except Exception:
+                pass
         out.append(p)
     return out
 
@@ -48,6 +63,9 @@ def list_upstream_models(providers: list[dict[str, Any]]) -> list[dict[str, str]
 
 
 def _route_candidates(model: str, routers: dict[str, Any]) -> list[str]:
+    from .meta import strip_route_display
+
+    model = strip_route_display(model)
     route = routers.get(model)
     if route is None:
         lower = model.lower()
@@ -98,7 +116,7 @@ def resolve_candidates(
     routers: dict[str, Any],
 ) -> list[tuple[dict[str, Any], str]]:
     """Return ordered (provider, upstream_model) candidates."""
-    from .ops import is_balance_exhausted
+    from .ops import is_balance_exhausted, is_daily_quota_exhausted
 
     wanted = [apply_alias(m) for m in _route_candidates(model, routers)]
 
@@ -114,22 +132,45 @@ def resolve_candidates(
         until = STATE.provider_quarantined_until(pname)
         return bool(until and now < until)
 
-    pairs: list[tuple[dict[str, Any], str, float]] = []
+    def quota_tier_rank(p: dict[str, Any]) -> int:
+        """Lower is better: daily quota → signup credit → free-pool fallback."""
+        t = str(p.get("quota_tier") or "").strip().lower()
+        if t == "daily":
+            return 0
+        if t == "signup":
+            return 1
+        if t == "free":
+            return 2
+        # Legacy providers without quota_tier: treat free_only + low weight as free pool.
+        try:
+            w = float(p.get("weight") or 1)
+        except (TypeError, ValueError):
+            w = 1.0
+        if bool(p.get("free_only")) and w <= 5:
+            return 2
+        return 1
+
+    def provider_usable(p: dict[str, Any]) -> bool:
+        pname = str(p.get("name") or "?")
+        if provider_blocked(pname):
+            return False
+        return True
+
+    pairs: list[tuple[dict[str, Any], str, float, float, int]] = []
     for upstream_model in wanted:
         for p in _enabled_providers(providers):
-            pname = str(p.get("name") or "?")
-            if provider_blocked(pname):
+            if not provider_usable(p):
                 continue
             models = _active_models(p)
             if not model_in(models, upstream_model):
                 continue
             canon = next((m for m in models if str(m).lower() == upstream_model.lower()), upstream_model)
-            h = STATE.get(pname, canon)
+            h = STATE.get(str(p.get("name") or "?"), canon)
             weight = float(p.get("weight") or 1)
             try:
                 from .commercial import provider_region_boost
 
-                weight *= provider_region_boost(str(p.get("base_url") or ""), pname)
+                weight *= provider_region_boost(str(p.get("base_url") or ""), str(p.get("name") or "?"))
             except Exception:
                 pass
             score = h.score(weight)
@@ -138,10 +179,11 @@ def resolve_candidates(
             # Skip models in cooldown so 429/404 losers don't burn every request.
             if now < h.open_until:
                 continue
-            pairs.append((p, canon, score, lat))
+            pairs.append((p, canon, score, lat, quota_tier_rank(p)))
 
     wanted_rank = {str(m).lower(): i for i, m in enumerate(wanted)}
-    pairs.sort(key=lambda t: (wanted_rank.get(str(t[1]).lower(), 999), -t[2], t[3]))
+    # Prefer daily/signup providers before free-pool; within a tier keep route candidate order.
+    pairs.sort(key=lambda t: (t[4], wanted_rank.get(str(t[1]).lower(), 999), -t[2], t[3]))
     seen: set[tuple[str, str]] = set()
     ordered: list[tuple[dict[str, Any], str]] = []
     for p, m, *_rest in pairs:
@@ -150,8 +192,31 @@ def resolve_candidates(
             continue
         seen.add(key)
         ordered.append((p, m))
+
+    def append_free_pool_spillover() -> None:
+        """日额度/赠送都不可用时，直接挂上启用中的免费池模型（模型 ID 不必出现在路由表）。"""
+        for p in sorted(_enabled_providers(providers), key=lambda x: -float(x.get("weight") or 1)):
+            if quota_tier_rank(p) != 2:
+                continue
+            if not provider_usable(p):
+                continue
+            pname = str(p.get("name") or "?")
+            for m in _active_models(p):
+                h = STATE.get(pname, m)
+                if now < float(h.open_until or 0):
+                    continue
+                key = (pname, m)
+                if key in seen:
+                    continue
+                seen.add(key)
+                ordered.append((p, m))
+
+    # 没有可用的日额度/赠送渠道时，立刻切免费池（不必等路由表里碰巧有同名模型）。
+    if not any(quota_tier_rank(p) < 2 for p, _ in ordered):
+        append_free_pool_spillover()
+
     # Last resort: if every candidate is cooling down, retry cooled list by route order.
-    # Never hard-retry balance-quarantined providers — that burns the client timeout.
+    # Never hard-retry balance/daily-quota quarantined providers — that burns the client timeout.
     if not ordered:
         for upstream_model in wanted:
             for p in _enabled_providers(providers):
@@ -163,11 +228,17 @@ def resolve_candidates(
                     continue
                 canon = next((m for m in models if str(m).lower() == upstream_model.lower()), upstream_model)
                 h = STATE.get(pname, canon)
-                if is_balance_exhausted(h.last_error) and now < float(h.open_until or 0):
+                if (
+                    is_balance_exhausted(h.last_error) or is_daily_quota_exhausted(h.last_error)
+                ) and now < float(h.open_until or 0):
                     continue
                 key = (pname, canon)
                 if key in seen:
                     continue
                 seen.add(key)
                 ordered.append((p, canon))
+        # Prefer free-pool last-resort only after non-free cooled entries.
+        ordered.sort(key=lambda t: quota_tier_rank(t[0]))
+        if not ordered:
+            append_free_pool_spillover()
     return ordered

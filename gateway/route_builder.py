@@ -14,11 +14,53 @@ from typing import Any, Callable
 from .config import DATA_DIR, load_config, load_providers, save_routers
 from .meta import apply_alias, is_non_chat_model
 
-TOP_N = 10
+TOP_N = 12
 MIN_CALLS_BLACKLIST = 5
 MIN_SUCCESS_BLACKLIST = 0.15
 
 USAGE_PATH = DATA_DIR / "usage.jsonl"
+
+# 永久免费小杯 / 聚合 free 池：能力弱、易失败，日常路由放到末尾兜底。
+_FREE_FALLBACK = re.compile(
+    r":free\b|openrouter/free|\b4b\b|\b7b\b|\b8b\b|lite|mini|instant|nemo(?!tron)|"
+    r"sensenova-6\.[67]-flash-lite|allam-2|lfm-|llm7|kilo-auto",
+    re.I,
+)
+
+# 日额度/赠送额度里更强的模型：日常优先尝试这些，再落到 free 兜底。
+_DAILY_QUALITY_PIN = (
+    "qwen3.8-max",
+    "qwen3.7-plus",
+    "deepseek-ai/DeepSeek-V4-Pro",
+    "deepseek-v4-pro",
+    "Qwen/Qwen3.5-397B-A17B",
+    "Qwen/Qwen3-235B-A22B-Instruct-2507",
+    "glm-5.2",
+    "nvidia/nemotron-3-super-120b-a12b",
+    "gemini-flash-latest",
+    "gemini-3-flash-preview",
+    "openai/gpt-oss-120b",
+    "gpt-oss-120b",
+    "qwen3.6-plus",
+    "qwen3.5-plus",
+    "qwen-plus",
+    "qwen3-max",
+    "Qwen/Qwen3.5-122B-A10B",
+    "deepseek-ai/DeepSeek-V4-Flash-0731",
+    "deepseek-v4-flash",
+    "qwen3.5-flash",
+    "qwen-flash",
+    "doubao-seed-1-6-251015",
+    "hunyuan-turbos-latest",
+    "Qwen/Qwen2.5-72B-Instruct",
+    "meta-llama/Llama-3.3-70B-Instruct",
+    "meta/llama-3.3-70b-instruct",
+    "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+    "@cf/openai/gpt-oss-120b",
+    "gemini-2.5-flash",
+    "Qwen/Qwen3.5-27B",
+    "glm-4.7",
+)
 
 _NOVEL_AVOID = re.compile(
     r"397b|v4-pro|kimi|z-ai|vl|vision|thinking|glm-5|gpt-oss|gemini|openrouter|cerebras|groq",
@@ -33,6 +75,9 @@ _NOVEL_PIN = (
     "doubao-seed-1-6-251015",
     "hunyuan-turbos-latest",
     "hunyuan-lite",
+    "qwen-plus",
+    "qwen3.7-plus",
+    "qwen3.5-plus",
 )
 
 # 识图：强度优先（同档再靠稳定性）。重建时会把「当前可用」整段提到前面。
@@ -129,13 +174,13 @@ PROFILES: list[RouteProfile] = [
     RouteProfile(
         "日常",
         "daily",
-        "综合日常：成功率 + 准确度 + 响应速度均衡（最多10个）",
+        "综合日常：日额度/强模型优先，免费小杯兜底（最多12个）",
         lambda m: not is_non_chat_model(m),
         ROUTE_ALIASES["日常"],
         reliability_w=0.40,
-        accuracy_w=0.35,
-        speed_w=0.25,
-        min_accuracy=0.45,
+        accuracy_w=0.45,
+        speed_w=0.15,
+        min_accuracy=0.55,
     ),
     RouteProfile(
         "快速",
@@ -152,11 +197,11 @@ PROFILES: list[RouteProfile] = [
         "复杂",
         "complex",
         "复杂任务：高准确度大杯优先，成功率过滤",
-        _compile(r"397b", r"235b", r"122b", r"nemotron-3-super", r"v4-pro", r"pro", r"70b", r"glm-5"),
+        _compile(r"397b", r"235b", r"122b", r"nemotron-3-super", r"v4-pro", r"pro", r"70b", r"glm-5", r"gemini", r"gpt-oss-120b", r"qwen-plus", r"qwen3\.8", r"qwen3\.7", r"qwen3\.6"),
         ROUTE_ALIASES["复杂"],
         reliability_w=0.35,
-        accuracy_w=0.50,
-        speed_w=0.15,
+        accuracy_w=0.55,
+        speed_w=0.10,
         min_accuracy=0.70,
     ),
     RouteProfile(
@@ -305,10 +350,14 @@ def model_accuracy_tier(model: str) -> float:
     # Dedicated VL / multimodal: prefer real vision models over tiny text LLMs.
     if re.search(r"qwen3-vl-235b|internvl|gpt-4o(?!-mini)", m, re.I):
         return 0.96
-    if re.search(r"qwen3-vl|nemotron-.*-vl|llama-3\.2-.*vision|phi-3-vision|gemini-.*flash", m, re.I):
+    if re.search(r"qwen3-vl|nemotron-.*-vl|llama-3\.2-.*vision|phi-3-vision|gemini-.*flash|qwen-vl", m, re.I):
         return 0.88
+    if _FREE_FALLBACK.search(m) and not re.search(r"120b|70b|nemotron-3-super|glm-5\.2:free", m, re.I):
+        return 0.32
     if _ACCURACY_ULTRA.search(m):
         return 0.95
+    if re.search(r"gemini-flash|gemini-3|qwen3\.8-max|qwen3\.7-plus|qwen3\.6-plus|qwen3\.5-plus|qwen-plus|qwen3-max|gpt-oss-120b|deepseek-v4-pro", m, re.I):
+        return 0.86
     if _ACCURACY_HIGH.search(m):
         return 0.82
     if _ACCURACY_MID.search(m):
@@ -316,6 +365,45 @@ def model_accuracy_tier(model: str) -> float:
     if _ACCURACY_LOW.search(m):
         return 0.35
     return 0.55
+
+
+def _is_free_fallback_model(model: str) -> bool:
+    m = model or ""
+    if re.search(r"nemotron-3-super.*:free|glm-5\.2:free|gpt-oss-120b", m, re.I):
+        return False
+    return bool(_FREE_FALLBACK.search(m))
+
+
+def _apply_quality_then_free(pool: list[str]) -> list[str]:
+    """日额度/强模型置顶，免费小杯与 :free 池放到末尾兜底。"""
+    if not pool:
+        return []
+    pin_rank = {m.lower(): i for i, m in enumerate(_DAILY_QUALITY_PIN)}
+    quality: list[str] = []
+    free: list[str] = []
+    seen: set[str] = set()
+
+    for pref in _DAILY_QUALITY_PIN:
+        hit = next((m for m in pool if m.lower() == pref.lower() and m not in seen), None)
+        if hit:
+            quality.append(hit)
+            seen.add(hit)
+
+    for m in pool:
+        if m in seen:
+            continue
+        if _is_free_fallback_model(m):
+            free.append(m)
+        else:
+            quality.append(m)
+        seen.add(m)
+
+    def qkey(m: str) -> tuple[int, float, str]:
+        return (pin_rank.get(m.lower(), 10_000), -model_accuracy_tier(m), m.lower())
+
+    quality.sort(key=qkey)
+    free.sort(key=lambda m: (-model_accuracy_tier(m), m.lower()))
+    return quality + free
 
 
 def _vision_model_usable(model: str, providers: list[dict[str, Any]]) -> bool:
@@ -442,24 +530,46 @@ def load_usage_stats() -> tuple[dict[str, Stat], dict[tuple[str, str], Stat]]:
     return global_stats, route_stats
 
 
+def _provider_tier_boost(p: dict[str, Any]) -> float:
+    """daily > signup > free：重建路由时抬高日额度渠道权重。"""
+    t = str(p.get("quota_tier") or "").strip().lower()
+    if t == "daily":
+        return 1.35
+    if t == "signup":
+        return 1.15
+    if t == "free":
+        return 0.55
+    try:
+        w = float(p.get("weight") or 1)
+    except (TypeError, ValueError):
+        w = 1.0
+    if bool(p.get("free_only")) and w <= 5:
+        return 0.55
+    return 1.0
+
+
 def _enabled_models(providers: list[dict[str, Any]] | None = None) -> list[str]:
     providers = providers if providers is not None else load_providers()
     ranked: list[tuple[float, str]] = []
     seen: set[str] = set()
-    for p in sorted(providers, key=lambda x: float(x.get("weight") or 1), reverse=True):
+    for p in sorted(
+        providers,
+        key=lambda x: float(x.get("weight") or 1) * _provider_tier_boost(x),
+        reverse=True,
+    ):
         if not p.get("enabled", True):
             continue
         key = str(p.get("api_key") or "").strip()
         if not key or key.startswith("REPLACE_") or "change-me" in key.lower():
             continue
         disabled = {str(x) for x in (p.get("disabled_models") or [])}
-        weight = float(p.get("weight") or 1)
+        weight = float(p.get("weight") or 1) * _provider_tier_boost(p)
         for m in p.get("models") or []:
             s = apply_alias(str(m))
             if not s or s in disabled or s in seen or is_non_chat_model(s):
                 continue
             seen.add(s)
-            ranked.append((weight, s))
+            ranked.append((weight * (0.45 if _is_free_fallback_model(s) else 1.0), s))
     ranked.sort(key=lambda x: (-x[0], x[1]))
     return [m for _, m in ranked]
 
@@ -668,12 +778,26 @@ def build_smart_routers(
         if profile.cn == "识图":
             # 先按「当前可用 + 强度」排池，再打分；最后再钉一次顺序，避免弱但稳的挤掉强 VL。
             pool = _apply_vision_preference(pool, providers)
+        if profile.cn in {"日常", "复杂", "推理", "代码", "长文"}:
+            # 日额度/强模型优先，免费小杯与 :free 池垫底。
+            pool = _apply_quality_then_free(pool)
         if profile.cn == "Agent":
             # 工具/Ardot 任务：严格按 PIN，不要被 VL/用量分打乱。
             pool = _apply_agent_preference(pool)
             cands = pool[:top_n]
         else:
             cands = pick_candidates(pool, profile, global_stats, route_stats, top_n=top_n)
+        if profile.cn in {"日常", "复杂", "推理", "代码", "长文"}:
+            cands = _apply_quality_then_free(cands)[:top_n]
+            # 强制留 2～3 个免费小杯/池作末尾兜底（额度打满或大杯失败时）。
+            free_tail = [
+                m
+                for m in _apply_quality_then_free(pool)
+                if _is_free_fallback_model(m) and m not in cands
+            ][:3]
+            if free_tail:
+                keep = max(0, top_n - len(free_tail))
+                cands = cands[:keep] + free_tail
         if profile.cn == "识图":
             cands = _apply_vision_preference(cands, providers)[:top_n]
         if profile.cn == "小说":

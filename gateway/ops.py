@@ -44,15 +44,105 @@ def is_balance_exhausted(err: str | None) -> bool:
     # ModelScope / similar: 429 body often says insufficient balance
     if "balance" in s and ("insufficient" in s or "not enough" in s or "耗尽" in s):
         return True
+    # 千问/百炼免费额度用尽
+    if "allocationquota" in s or "freetiersonly" in s or "free_tier" in s:
+        return True
+    if "免费额度" in (err or "") and ("用尽" in (err or "") or "耗尽" in (err or "") or "不足" in (err or "")):
+        return True
     return False
+
+
+def is_daily_quota_exhausted(err: str | None) -> bool:
+    """True when upstream hit daily request/token caps (RPD), not a short RPM blip."""
+    s = (err or "").lower()
+    if not s:
+        return False
+    if is_balance_exhausted(s):
+        return True
+    markers = (
+        "per day",
+        "perday",
+        "rpd",
+        "daily quota",
+        "daily limit",
+        "day limit",
+        "requests today",
+        "quota exceeded",
+        "exceeded your current quota",
+        "resource_exhausted",
+        "日限额",
+        "日额度",
+        "今日额度",
+        "当天额度",
+        "每日",
+        "次数用尽",
+        "调用次数已达",
+    )
+    if any(m in s for m in markers):
+        return True
+    # Generic "quota" on 429-ish text — treat as daily when not clearly RPM.
+    if "quota" in s and "rate" in s and "minute" not in s and "rpm" not in s:
+        return True
+    return False
+
+
+def provider_quota_tier(provider: dict[str, Any] | None) -> str:
+    p = provider or {}
+    t = str(p.get("quota_tier") or "").strip().lower()
+    if t in {"daily", "signup", "free"}:
+        return t
+    try:
+        w = float(p.get("weight") or 1)
+    except (TypeError, ValueError):
+        w = 1.0
+    if bool(p.get("free_only")) and w <= 5:
+        return "free"
+    return "daily"
+
+
+def seconds_until_quota_refresh(provider: dict[str, Any] | None = None) -> float:
+    """Seconds until next daily quota refresh (+5min buffer). CN → Asia/Shanghai; 多数海外 → UTC."""
+    from datetime import datetime, timedelta, timezone
+
+    name = str((provider or {}).get("name") or "").lower()
+    base = str((provider or {}).get("base_url") or "").lower()
+    overseas = (
+        "groq",
+        "gemini",
+        "googleapis",
+        "cerebras",
+        "openrouter",
+        "cloudflare",
+        "nvidia",
+        "huggingface",
+        "kilo",
+        "llm7",
+        "mistral",
+        "together",
+        "fireworks",
+    )
+    use_utc = any(x in name or x in base for x in overseas)
+    if use_utc:
+        now = datetime.now(timezone.utc)
+        nxt = (now + timedelta(days=1)).replace(hour=0, minute=5, second=0, microsecond=0)
+        return max(300.0, (nxt - now).total_seconds())
+    try:
+        from zoneinfo import ZoneInfo
+
+        tz = ZoneInfo("Asia/Shanghai")
+    except Exception:
+        tz = timezone(timedelta(hours=8))
+    now = datetime.now(tz)
+    nxt = (now + timedelta(days=1)).replace(hour=0, minute=5, second=0, microsecond=0)
+    return max(300.0, (nxt - now).total_seconds())
 
 
 def classify_error(err: str | None) -> str:
     s = (err or "").lower()
     if not s:
         return "unknown"
-    # Balance before generic 429 — "insufficient balance" often rides on HTTP 429.
-    if is_balance_exhausted(s):
+    # Balance / daily free-tier before generic 429.
+    if is_balance_exhausted(s) or is_daily_quota_exhausted(s):
         return "balance"
     if "429" in s or "rate" in s or "quota" in s or "限流" in s:
         return "rate_limit"
@@ -95,8 +185,8 @@ def recent_failures(limit: int = 20) -> list[dict[str, Any]]:
 
 def remediation_hint(kind: str, err: str | None = None) -> str:
     s = (err or "").lower()
-    if kind == "balance" or is_balance_exhausted(s):
-        return "该上游账户额度已用尽：网关会自动换其它渠道；也可充值该平台或粘贴新 Key。"
+    if kind == "balance" or is_balance_exhausted(s) or is_daily_quota_exhausted(s):
+        return "该上游日额度/免费额度已用尽：网关会改走其它渠道或免费池，并在次日刷新后自动再试。"
     if kind == "rate_limit" or "429" in s:
         return "上游限流：网关会自动换路；也可稍后重试或换「快速」路由。"
     if kind == "auth" or "401" in s or "403" in s:

@@ -37,6 +37,7 @@ def reload_models_meta() -> dict[str, Any]:
 
 
 def apply_alias(model: str) -> str:
+    model = strip_route_display(model)
     meta = load_models_meta()
     aliases = meta.get("aliases") or {}
     if not isinstance(aliases, dict):
@@ -48,6 +49,32 @@ def apply_alias(model: str) -> str:
         if str(k).lower() == lower:
             return str(v)
     return model
+
+
+def strip_route_display(model: str) -> str:
+    """WorkBuddy may echo '日常 · ModelScope/xxx'; keep only the route id."""
+    s = str(model or "").strip()
+    if not s:
+        return s
+    for sep in (" · ", "｜", " | ", " — ", " - "):
+        if sep in s:
+            head = s.split(sep, 1)[0].strip()
+            if head:
+                return head
+    return s
+
+
+def format_route_display(client_model: str, provider: str, upstream_model: str) -> str:
+    """Show upstream in response.model so WorkBuddy UI can display it; still routable via strip."""
+    route = strip_route_display(client_model) or client_model or "日常"
+    short = (upstream_model or "").strip()
+    if "/" in short:
+        short = short.split("/")[-1]
+    if short.startswith("@"):
+        short = short.split("/")[-1] if "/" in short else short
+    short = (short or upstream_model or "?")[:48]
+    pname = (provider or "?").strip()[:24]
+    return f"{route} · {pname}/{short}"
 
 
 def is_non_chat_model(model: str) -> bool:

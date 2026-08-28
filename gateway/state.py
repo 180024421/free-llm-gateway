@@ -63,6 +63,20 @@ class ChannelHealth:
         except Exception:
             pass
 
+    def mark_fail_until(self, error: str, until: float) -> None:
+        """Fixed open_until (e.g. until next daily quota refresh), no exponential blow-up."""
+        self.failures += 1
+        self.consecutive_failures += 1
+        self.last_error = (error or "")[:500]
+        self.last_fail_at = time.time()
+        self.open_until = max(float(self.open_until or 0.0), float(until))
+        try:
+            from .channel_store import schedule_save
+
+            schedule_save(STATE)
+        except Exception:
+            pass
+
 
 PROVIDER_SENTINEL = "*"
 
@@ -71,6 +85,11 @@ PROVIDER_SENTINEL = "*"
 class RuntimeState:
     lock: threading.RLock = field(default_factory=threading.RLock)
     health: dict[str, ChannelHealth] = field(default_factory=dict)
+    last_chat: dict[str, Any] | None = None
+
+    def note_last_chat(self, row: dict[str, Any]) -> None:
+        with self.lock:
+            self.last_chat = dict(row or {})
 
     def key(self, provider: str, model: str) -> str:
         return f"{provider}::{model}"

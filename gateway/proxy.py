@@ -426,6 +426,26 @@ def rewrite_model_field(obj: Any, client_model: str, *, stream_delta: bool = Fal
     return obj
 
 
+def response_model_label(
+    client_model: str,
+    provider: dict[str, Any] | None,
+    upstream_model: str,
+    *,
+    expose: bool = True,
+) -> str:
+    """Keep route id for routing; optionally append upstream for WorkBuddy display."""
+    from .meta import format_route_display, strip_route_display
+
+    route = strip_route_display(client_model)
+    if not expose:
+        return route
+    return format_route_display(
+        route,
+        str((provider or {}).get("name") or "?"),
+        upstream_model,
+    )
+
+
 def payload_has_usable_text(obj: Any) -> bool:
     if not isinstance(obj, dict):
         return False
@@ -565,7 +585,9 @@ class SseModelRewriter:
 
 
 def is_fast_route(client_model: str) -> bool:
-    raw = (client_model or "").strip()
+    from .meta import strip_route_display
+
+    raw = strip_route_display(client_model or "").strip()
     m = raw.lower()
     return raw in {"快速", "fast", "256k", "翻译", "总结"} or m in {
         "fast",
@@ -577,7 +599,9 @@ def is_fast_route(client_model: str) -> bool:
 
 
 def is_daily_route(client_model: str) -> bool:
-    raw = (client_model or "").strip()
+    from .meta import strip_route_display
+
+    raw = strip_route_display(client_model or "").strip()
     m = raw.lower()
     return raw in {"日常", "daily"} or m in {"daily", "default", "auto"}
 
@@ -588,25 +612,33 @@ def is_snappy_route(client_model: str) -> bool:
 
 
 def is_complex_route(client_model: str) -> bool:
-    raw = (client_model or "").strip()
+    from .meta import strip_route_display
+
+    raw = strip_route_display(client_model or "").strip()
     m = raw.lower()
     return raw in {"复杂", "推理"} or m in {"complex", "reasoning", "think"}
 
 
 def is_novel_route(client_model: str) -> bool:
-    raw = (client_model or "").strip()
+    from .meta import strip_route_display
+
+    raw = strip_route_display(client_model or "").strip()
     m = raw.lower()
     return raw in {"小说", "长文"} or m in {"novel", "longctx", "long", "1m"}
 
 
 def is_coding_route(client_model: str) -> bool:
-    raw = (client_model or "").strip()
+    from .meta import strip_route_display
+
+    raw = strip_route_display(client_model or "").strip()
     m = raw.lower()
     return raw in {"代码", "Agent", "agent"} or m in {"code", "agent"}
 
 
 def is_vision_route(client_model: str) -> bool:
-    raw = (client_model or "").strip()
+    from .meta import strip_route_display
+
+    raw = strip_route_display(client_model or "").strip()
     return raw in {"识图", "vision"} or raw.lower() == "vision"
 
 
@@ -633,6 +665,9 @@ def looks_like_design_tools(body: dict[str, Any]) -> bool:
 
 def remount_route_for_tools(client_model: str, body: dict[str, Any]) -> str:
     """If canvas/design tools (or any tools on 识图), force Agent text models."""
+    from .meta import strip_route_display
+
+    client_model = strip_route_display(client_model)
     has_tools = bool(body.get("tools"))
     if not has_tools:
         return client_model
@@ -816,31 +851,72 @@ def _sanitize_payload(
     return {k: v for k, v in payload.items() if v is not None}
 
 
-def _fail_cooldown_sec(status_code: int, err_text: str) -> float:
-    from .ops import is_balance_exhausted
+def _fail_cooldown_sec(
+    status_code: int,
+    err_text: str,
+    provider: dict[str, Any] | None = None,
+) -> float:
+    from .ops import (
+        is_balance_exhausted,
+        is_daily_quota_exhausted,
+        provider_quota_tier,
+        seconds_until_quota_refresh,
+    )
 
     low = (err_text or "").lower()
-    # Account exhausted: long quarantine so other providers take over automatically.
-    if is_balance_exhausted(low) or (
+    tier = provider_quota_tier(provider)
+    daily_out = is_balance_exhausted(low) or is_daily_quota_exhausted(low) or (
         ("balance" in low or "余额" in low or "欠费" in low) and status_code in (402, 403, 429)
-    ):
-        return 21600.0  # 6h — free tiers rarely refill sooner
+    )
+    # 日额度 / 注册赠送耗尽：隔离到次日刷新，期间路由会改走免费池。
+    if daily_out and tier in {"daily", "signup"}:
+        return seconds_until_quota_refresh(provider)
+    if daily_out:
+        return min(21600.0, seconds_until_quota_refresh(provider))
     if status_code == 429 or "rate" in low or "限流" in low or "quota" in low:
-        return 120.0
+        # 短暂 RPM：免费池只短冷却；日额度渠道若已识别为日限上面已返回。
+        return 90.0 if tier == "free" else 120.0
     if status_code in (404, 410):
         return 3600.0
     if "balance" in low or "insufficient" in low or "余额" in low or "欠费" in low:
-        return 7200.0
+        return seconds_until_quota_refresh(provider) if tier != "free" else 7200.0
     return 45.0
 
 
-def _note_upstream_fail(provider: str, model: str, error: str, cooldown_sec: float) -> None:
-    """Mark model fail; on balance exhaustion, quarantine whole provider for auto-failover."""
-    from .ops import is_balance_exhausted
+def _note_upstream_fail(
+    provider: str,
+    model: str,
+    error: str,
+    cooldown_sec: float,
+    *,
+    provider_meta: dict[str, Any] | None = None,
+) -> None:
+    """Mark model fail; on daily/balance exhaustion isolate until refresh so free pool takes over."""
+    from .ops import (
+        is_balance_exhausted,
+        is_daily_quota_exhausted,
+        provider_quota_tier,
+    )
     from .state import STATE
 
-    if is_balance_exhausted(error):
-        # Fixed long window (no exponential blow-up) + skip entire account next time.
+    tier = provider_quota_tier(provider_meta)
+    exhausted = is_balance_exhausted(error) or is_daily_quota_exhausted(error)
+    until = time.time() + max(60.0, float(cooldown_sec))
+
+    if exhausted and tier == "signup":
+        # 千问等：各模型免费额度独立，只封当前模型到次日/到期，其它模型继续打。
+        STATE.get(provider, model).mark_fail_until(error, until)
+        return
+    if exhausted and tier in {"daily", "free"}:
+        # 日额度账户或免费池账号级耗尽：整渠隔离，自动换其它渠道/免费池。
+        ch = STATE.get(provider, model)
+        ch.failures += 1
+        ch.consecutive_failures += 1
+        ch.last_error = (error or "")[:500]
+        ch.last_fail_at = time.time()
+        STATE.quarantine_provider(provider, error=error, cooldown_sec=cooldown_sec)
+        return
+    if exhausted:
         ch = STATE.get(provider, model)
         ch.failures += 1
         ch.consecutive_failures += 1
@@ -876,6 +952,16 @@ async def forward_chat(
     payload = _sanitize_payload(
         body, upstream_model, client_model=client_model, provider=provider
     )
+    expose_upstream = True
+    try:
+        from .config import load_config
+
+        expose_upstream = bool(load_config().get("expose_upstream_model", True))
+    except Exception:
+        expose_upstream = True
+    display_model = response_model_label(
+        client_model, provider, upstream_model, expose=expose_upstream
+    )
     has_tools = bool(payload.get("tools"))
     fast = is_fast_route(client_model)
     cfg_stream = load_config()
@@ -892,10 +978,29 @@ async def forward_chat(
         "provider": name,
         "upstream_model": upstream_model,
         "client_model": client_model,
+        "display_model": display_model,
         "url": url,
         "request_id": (client_request_id or upstream_req_id),
         "upstream_request_id": upstream_req_id,
     }
+
+    def _remember_ok() -> None:
+        try:
+            from .meta import strip_route_display as _strip
+
+            STATE.note_last_chat(
+                {
+                    "ts": time.time(),
+                    "route": _strip(client_model),
+                    "client_model": client_model,
+                    "display_model": display_model,
+                    "provider": name,
+                    "upstream_model": upstream_model,
+                    "latency_ms": meta.get("latency_ms"),
+                }
+            )
+        except Exception:
+            pass
 
     client = get_http_client(timeout_sec)
     resp: httpx.Response | None = None
@@ -909,12 +1014,13 @@ async def forward_chat(
             if resp.status_code >= 400:
                 err_body = (await resp.aread()).decode("utf-8", errors="replace")
                 await resp.aclose()
-                cd = _fail_cooldown_sec(resp.status_code, err_body)
+                cd = _fail_cooldown_sec(resp.status_code, err_body, provider)
                 _note_upstream_fail(
                     name,
                     upstream_model,
                     f"HTTP {resp.status_code}: {err_body[:300]}",
                     cd,
+                    provider_meta=provider,
                 )
                 meta["error"] = err_body
                 meta["status_code"] = resp.status_code
@@ -934,7 +1040,7 @@ async def forward_chat(
                 )
                 return None, None, meta
 
-            rewriter = SseModelRewriter(client_model)
+            rewriter = SseModelRewriter(display_model)
             # Queue-based peek: never break aiter_bytes mid-stream (that caused
             # incomplete chunked reads / WorkBuddy hang).
             q: asyncio.Queue[tuple[str, Any]] = asyncio.Queue()
@@ -966,7 +1072,7 @@ async def forward_chat(
                         await pump_task
                     except Exception:
                         pass
-                _note_upstream_fail(name, upstream_model, err, cooldown)
+                _note_upstream_fail(name, upstream_model, err, cooldown, provider_meta=provider)
                 meta["error"] = err
                 meta["status_code"] = 200
                 _append_usage(
@@ -1030,6 +1136,7 @@ async def forward_chat(
                     peek.append(b"data: [DONE]\n\n")
 
                 STATE.get(name, upstream_model).mark_ok(latency)
+                _remember_ok()
 
                 async def gen_buf() -> AsyncIterator[bytes]:
                     try:
@@ -1089,6 +1196,7 @@ async def forward_chat(
                 usable = True
 
             STATE.get(name, upstream_model).mark_ok(latency)
+            _remember_ok()
 
             async def gen() -> AsyncIterator[bytes]:
                 stream_ok = True
@@ -1146,7 +1254,8 @@ async def forward_chat(
                 name,
                 upstream_model,
                 f"HTTP {resp.status_code}: {err_text}",
-                _fail_cooldown_sec(resp.status_code, resp.text),
+                _fail_cooldown_sec(resp.status_code, resp.text, provider),
+                provider_meta=provider,
             )
             meta["error"] = resp.text
             return None, None, meta
@@ -1154,24 +1263,28 @@ async def forward_chat(
         usage = {}
         try:
             data = resp.json()
-            data = rewrite_model_field(data, client_model, stream_delta=False)
+            data = rewrite_model_field(data, display_model, stream_delta=False)
             usage = data.get("usage") or {}
         except Exception:
             data = None
 
         if isinstance(data, dict) and not payload_has_usable_text(data):
-            _note_upstream_fail(name, upstream_model, "empty assistant content", 45.0)
+            _note_upstream_fail(
+                name, upstream_model, "empty assistant content", 45.0, provider_meta=provider
+            )
             meta["error"] = "empty assistant content"
             meta["_raw"] = data
             return None, None, meta
 
         STATE.get(name, upstream_model).mark_ok(latency)
+        _remember_ok()
         _append_usage(
             {
                 "ts": time.time(),
                 "provider": name,
                 "model": upstream_model,
                 "client_model": client_model,
+                "display_model": display_model,
                 "stream": False,
                 "latency_ms": meta.get("latency_ms"),
                 "ok": True,
@@ -1195,7 +1308,7 @@ async def forward_chat(
             pass
         raise
     except Exception as e:
-        _note_upstream_fail(name, upstream_model, str(e), 45.0)
+        _note_upstream_fail(name, upstream_model, str(e), 45.0, provider_meta=provider)
         meta["error"] = str(e)
         return None, None, meta
 
