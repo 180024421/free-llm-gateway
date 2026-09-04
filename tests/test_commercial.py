@@ -39,6 +39,13 @@ def test_commercial_forces_license(monkeypatch):
     assert lic.license_required({"require_license": False}) is True
 
 
+def test_placeholder_local_key():
+    assert com.is_placeholder_local_key("sk-local-change-me") is True
+    assert com.is_placeholder_local_key("REPLACE_ME") is True
+    assert com.is_placeholder_local_key("") is True
+    assert com.is_placeholder_local_key("sk-dashuai-abcdef12") is False
+
+
 def test_reserve_and_release(monkeypatch):
     monkeypatch.setattr(lic, "license_required", lambda cfg=None: True)
     monkeypatch.setattr(

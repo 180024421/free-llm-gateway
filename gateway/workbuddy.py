@@ -364,7 +364,20 @@ def _write_models_file(path: Path, merged: list[dict[str, Any]]) -> bool:
 
 
 def sync_workbuddy(*, auto: bool = False) -> dict[str, Any]:
+    from .commercial import is_placeholder_local_key
+
     cfg = load_config()
+    key = str(cfg.get("local_api_key") or "").strip()
+    if is_placeholder_local_key(key):
+        path = workbuddy_models_path()
+        return {
+            "ok": False,
+            "skipped": True,
+            "auto": auto,
+            "reason": "placeholder_local_api_key",
+            "path": str(path),
+            "hint": "本地 API Key 仍是占位符，已跳过同步以免覆盖 WorkBuddy。请先在控制台设置本地 Key。",
+        }
     routers = load_routers()
     providers = load_providers()
     ours = build_workbuddy_models(cfg, routers)

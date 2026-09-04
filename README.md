@@ -9,7 +9,7 @@
 | 模式 | 授权 | 说明 |
 |------|------|------|
 | **开发自测** | `data/config.json` 可设 `"require_license": false` | 本地改代码、`start.cmd` 启动 |
-| **正式分发（EXE）** | **强制** `require_license: true`（`commercial_mode`） | 需登录/卡密；忽略用户关掉授权的尝试 |
+| **正式分发（Windows EXE / Mac zip）** | **强制** `require_license: true`（`commercial_mode`） | 需登录/卡密；忽略用户关掉授权的尝试 |
 
 **卖点说明**：正式版售卖的是 **网关授权（时长 / Token 配额）**，上游 LLM 仍由用户自备 Key。若要售「云端算力 Token」，需自建上游池（见下方）。
 
@@ -30,12 +30,15 @@ cd E:\xiangmu\dashuai-gateway-main\dashuai-gateway-main
 |----|------|------|
 | 网关核心 | `gateway/` + `web/` | 本机 API + 控制台（**UI 单源：`web/index.html`**） |
 | Windows EXE | `packaging/` | `build-exe.cmd` → `dist/DashuaiGateway.exe` |
+| Mac 便携包 | `packaging/build-mac-zip.py` | → `dist-release/大帅网关-mac-arm64.zip`（独立窗口） |
 | VS Code / Cursor | `clients/vscode/` | 11 用途路由 + 流式侧栏问答 |
 | IntelliJ IDEA | `clients/idea/` | 控制台 / 设置 |
 | Android APK | `clients/android/` | 局域网 bootstrap 自动提示网关地址 |
 | WorkBuddy | 面板「同步 WorkBuddy」 | 写入 11 类用途 + 本地 Key |
 
-## 打 EXE
+公网教程（Win/Mac 分 Tab）：https://1ph1hf8043323.vicp.fun/guides/dashuai-gateway-start/
+
+## 打 Windows EXE
 
 ```powershell
 .\packaging\build-exe.cmd
@@ -43,14 +46,25 @@ cd E:\xiangmu\dashuai-gateway-main\dashuai-gateway-main
 
 产物：`dist\DashuaiGateway.exe`
 
+## 打 Mac 便携包（可在 Windows 上交叉打包）
+
+```powershell
+.\packaging\build-mac-zip.cmd
+# 或
+py -3 packaging\build-mac-zip.py --arch arm64
+```
+
+产物：`dist-release\大帅网关-mac-arm64.zip`  
+说明见 `packaging/mac/README.md`。打包**只含 example 配置**，勿把本机真实 Key 打进 zip。
+
 ## 主要能力（近期）
 
-- 正式版强制授权、会话加密、短离线宽限、chat 前 Token 预留
+- 正式版强制授权、短离线宽限、chat 前 Token 预留（Windows 会话可用 DPAPI）
 - 11 类用途智能路由 + 延迟/地区偏好 + 日常/快速竞速
-- WorkBuddy 同步（含本地 Key）；启动时避免占位 Key 覆盖客户端
+- WorkBuddy 同步（含本地 Key）；占位 Key 不会覆盖客户端；商业包首次自动生成本地 Key
+- Mac / Windows 桌面壳：独立窗口；Mac 日志与数据统一在包内 `data/`
 - 消耗统计：真实 usage 优先；估算会标记 `usage_estimated`
 - 运维：用量归档/清空、配置备份、WorkBuddy 自检、License 用量上报
-- Windows：上游 Key / 登录会话 DPAPI 加密
 
 ## 云端算力 Token（可选架构）
 
@@ -75,4 +89,4 @@ npm run package
 
 ## 发给他人
 
-见仓库根目录 `发给别人-使用说明.md`。
+见仓库根目录 `发给别人-使用说明.md`（含 Windows / Mac）。

@@ -239,19 +239,27 @@ def is_overseas_provider(base_url: str = "", provider_name: str = "") -> bool:
     return any(h in low for h in vpn_hints)
 
 
+def is_placeholder_local_key(key: str | None) -> bool:
+    s = (key or "").strip()
+    return (
+        (not s)
+        or ("change-me" in s.lower())
+        or s.startswith("REPLACE_")
+        or ("YOUR_KEY" in s)
+    )
+
+
 def unify_local_api_key(data_dir: Path | None = None) -> str | None:
-    """If current local_api_key is placeholder, restore from sibling dist/data or ../data."""
+    """If local_api_key is placeholder: restore from sibling data, else mint for commercial."""
+    import secrets
+
     from .config import DATA_DIR, load_config, save_config
 
     root = Path(data_dir or DATA_DIR)
     cfg = load_config()
     cur = str(cfg.get("local_api_key") or "").strip()
 
-    def bad(k: str) -> bool:
-        s = (k or "").strip()
-        return (not s) or ("change-me" in s.lower()) or s.startswith("REPLACE_") or ("YOUR_KEY" in s)
-
-    if not bad(cur):
+    if not is_placeholder_local_key(cur):
         return None
 
     candidates = [
@@ -270,8 +278,15 @@ def unify_local_api_key(data_dir: Path | None = None) -> str | None:
             key = str((other or {}).get("local_api_key") or "").strip()
         except Exception:
             continue
-        if bad(key):
+        if is_placeholder_local_key(key):
             continue
+        cfg["local_api_key"] = key
+        save_config(cfg)
+        return key
+
+    # Clean commercial install: mint a unique local key so WorkBuddy sync is safe.
+    if is_commercial_build(cfg):
+        key = "sk-dashuai-" + secrets.token_hex(8)
         cfg["local_api_key"] = key
         save_config(cfg)
         return key

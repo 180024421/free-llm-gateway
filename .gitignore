@@ -22,6 +22,8 @@ data/_import_*.json
 dist/
 dist-share/
 dist-installer/
+dist-release/
+packaging/.mac-cache/
 build/
 tools/innosetup/
 *.exe

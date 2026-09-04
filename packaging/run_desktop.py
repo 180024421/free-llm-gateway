@@ -24,9 +24,16 @@ def _exe_dir() -> Path:
     return _bundle_root()
 
 
+def _data_dir() -> Path:
+    env = os.environ.get("DASHUAI_DATA_DIR", "").strip()
+    if env:
+        return Path(env)
+    return _exe_dir() / "data"
+
+
 def _log(msg: str) -> None:
     try:
-        log_path = _exe_dir() / "data" / "desktop.log"
+        log_path = _data_dir() / "desktop.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
         with log_path.open("a", encoding="utf-8") as f:
             f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {msg}\n")
@@ -77,9 +84,19 @@ def _port_free(host: str, port: int) -> bool:
 
 
 def _who_listens(port: int) -> str:
-    """Best-effort: name the process holding the port (Windows)."""
+    """Best-effort: name the process holding the port."""
     try:
         import subprocess
+
+        if sys.platform == "darwin":
+            out = subprocess.check_output(
+                ["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN"],
+                text=True,
+                encoding="utf-8",
+                errors="ignore",
+            )
+            lines = [ln.strip() for ln in out.splitlines() if ln.strip() and not ln.startswith("COMMAND")]
+            return "; ".join(lines[:3]) if lines else ""
 
         flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         out = subprocess.check_output(
@@ -119,6 +136,35 @@ def _who_listens(port: int) -> str:
         return ""
 
 
+def _confirm(title: str, text: str) -> bool:
+    """Yes/No confirm. Returns True if user chose Yes."""
+    if sys.platform == "darwin":
+        try:
+            import subprocess
+
+            t = title.replace("\\", "\\\\").replace('"', '\\"')
+            b = text.replace("\\", "\\\\").replace('"', '\\"')
+            r = subprocess.run(
+                [
+                    "osascript",
+                    "-e",
+                    f'display dialog "{b}" with title "{t}" buttons {{"取消", "是"}} default button "是"',
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            return r.returncode == 0 and "是" in (r.stdout or "")
+        except Exception:
+            return False
+    try:
+        import ctypes
+
+        return ctypes.windll.user32.MessageBoxW(0, text, title, 0x4) == 6
+    except Exception:
+        return False
+
+
 def _wait_ready(url: str, *, expect_version: str, timeout: float = 25.0) -> bool:
     """Wait until OUR gateway answers (version match), not some other process on the port."""
     deadline = time.time() + timeout
@@ -142,6 +188,21 @@ def _wait_ready(url: str, *, expect_version: str, timeout: float = 25.0) -> bool
 
 
 def _msgbox(title: str, text: str, error: bool = True) -> None:
+    if sys.platform == "darwin":
+        try:
+            import subprocess
+
+            # Escape for AppleScript string
+            t = title.replace("\\", "\\\\").replace('"', '\\"')
+            b = text.replace("\\", "\\\\").replace('"', '\\"')
+            subprocess.run(
+                ["osascript", "-e", f'display alert "{t}" message "{b}" as {"critical" if error else "informational"}'],
+                check=False,
+                capture_output=True,
+            )
+            return
+        except Exception:
+            pass
     try:
         import ctypes
 
@@ -269,10 +330,15 @@ def _prepare_env(root: Path) -> None:
         sys.path.insert(0, root_s)
     os.chdir(root)
 
-    if getattr(sys, "frozen", False):
-        exe_dir = Path(sys.executable).resolve().parent
-        data_dir = exe_dir / "data"
-        data_dir.mkdir(exist_ok=True)
+    # Frozen EXE, or Mac 便携包通过 DASHUAI_DATA_DIR / DASHUAI_BUNDLE_DIR 指定数据目录
+    bundle_data = os.environ.get("DASHUAI_DATA_DIR", "").strip()
+    use_local_data = getattr(sys, "frozen", False) or bool(bundle_data)
+    if use_local_data:
+        if bundle_data:
+            data_dir = Path(bundle_data)
+        else:
+            data_dir = Path(sys.executable).resolve().parent / "data"
+        data_dir.mkdir(parents=True, exist_ok=True)
         for name in ("config", "providers", "routers"):
             target = data_dir / f"{name}.json"
             example = root / "data" / f"{name}.example.json"
@@ -403,12 +469,13 @@ def main() -> None:
     if not _port_free(bind_host, port):
         who = _who_listens(port)
         _log(f"port {port} busy: {who}")
+        cfg_hint = "data/config.json" if sys.platform == "darwin" else "data\\config.json"
         _msgbox(
             __product__,
             f"端口 {port} 已被占用，本程序无法启动。\n\n"
             f"占用进程：{who or '未知'}\n\n"
-            "请先关掉已打开的大帅网关窗口，或结束占用该端口的 python/uvicorn，"
-            f"或把 data\\config.json 里的 port 改成其他端口后重试。",
+            "请先关掉已打开的大帅网关窗口，或结束占用该端口的进程，"
+            f"或把 {cfg_hint} 里的 port 改成其他端口后重试。",
         )
         sys.exit(1)
 
@@ -428,11 +495,12 @@ def main() -> None:
     if not _wait_ready(ui, expect_version=__version__):
         detail = repr(server_err[0]) if server_err else "超时未就绪"
         _log(f"wait_ready failed: {detail}")
+        log_hint = "data/desktop.log" if sys.platform == "darwin" else "data\\desktop.log"
         _msgbox(
             __product__,
             f"服务未能在端口 {port} 启动（版本 {__version__}）。\n\n"
             f"原因：{detail}\n\n"
-            "请检查端口是否被占用，或查看 data\\desktop.log。",
+            f"请检查端口是否被占用，或查看 {log_hint}。",
         )
         sys.exit(1)
 
@@ -453,13 +521,7 @@ def main() -> None:
             if tips:
                 text += "\n\n" + str(tips[0])
             text += "\n\n点「是」立即同步 WorkBuddy（之后请完全退出并重启 WorkBuddy）。"
-            try:
-                import ctypes
-
-                ans = ctypes.windll.user32.MessageBoxW(0, text, __product__, 0x4)
-                if ans != 6:
-                    return
-            except Exception:
+            if not _confirm(__product__, text):
                 return
             local_key = ""
             try:
@@ -476,7 +538,12 @@ def main() -> None:
             )
             with urllib.request.urlopen(req, timeout=15):
                 pass
-            _msgbox(__product__, "已同步 WorkBuddy。\n请任务栏右键完全退出并重启 WorkBuddy。", error=False)
+            restart_hint = (
+                "请完全退出并重启 WorkBuddy。"
+                if sys.platform == "darwin"
+                else "请任务栏右键完全退出并重启 WorkBuddy。"
+            )
+            _msgbox(__product__, f"已同步 WorkBuddy。\n{restart_hint}", error=False)
         except Exception as exc:
             _log(f"workbuddy drift check skipped: {exc!r}")
 
@@ -505,9 +572,17 @@ def main() -> None:
     except Exception:
         pass
 
-    # edgechromium = WebView2 (Win10/11); falls back automatically if unavailable
+    # Windows: WebView2；macOS: 系统 WKWebView（与 EXE 一样是独立窗口，不是浏览器）
     threading.Thread(target=_token_low_watcher, args=(port,), daemon=True, name="dashuai-token-watch").start()
     threading.Thread(target=_tray_failure_watcher, args=(port,), daemon=True, name="dashuai-fail-watch").start()
+    if sys.platform == "darwin":
+        try:
+            webview.start(debug=False)
+        except Exception as exc:
+            _log(f"webview cocoa failed: {exc!r}")
+            _msgbox(__product__, f"窗口无法打开：{exc}\n\n请确认系统允许运行，或查看 data/desktop.log。")
+            sys.exit(1)
+        return
     try:
         webview.start(gui="edgechromium", debug=False)
     except Exception as exc:

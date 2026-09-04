@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import sys
 import time
 from copy import deepcopy
 from pathlib import Path
@@ -50,6 +51,9 @@ def _appdata() -> Path:
         return Path(raw)
     if os.name == "nt":
         return Path.home() / "AppData" / "Roaming"
+    # macOS: Cursor / VS Code 配置在 Application Support
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support"
     return Path.home() / ".config"
 
 
