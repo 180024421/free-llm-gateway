@@ -79,9 +79,9 @@
 
   "code_max_retries": 4,
 
-  "license_api_base": "https://1ph1hf8043323.vicp.fun/api",
+  "license_api_base": "http://111.229.202.251/api",
 
-  "license_api_base_fallback": "http://111.229.202.251:8687/api",
+  "license_api_base_fallback": "http://111.229.202.251/api",
 
   "license_project_id": 4,
 
@@ -89,7 +89,7 @@
 
   "commercial_mode": false,
 
-  "license_allow_insecure_http": false,
+  "license_allow_insecure_http": true,
 
   "encrypt_session": true,
 

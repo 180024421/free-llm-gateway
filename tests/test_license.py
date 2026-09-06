@@ -58,8 +58,17 @@ def test_jane_bases_vicp_auto_fallback(monkeypatch):
         lambda: {"license_api_base": "https://1ph1hf8043323.vicp.fun/api"},
     )
     bases = lic.jane_bases()
-    assert "https://1ph1hf8043323.vicp.fun/api" in bases
-    assert "http://111.229.202.251:8687/api" in bases
+    # 花生壳基址会迁移到公网 HTTP IP 入口
+    assert "http://111.229.202.251/api" in bases
+    assert all("vicp.fun" not in b for b in bases)
+
+
+def test_migrate_vicp_https_to_http_ip():
+    from gateway.commercial import migrate_public_license_base
+
+    assert migrate_public_license_base("https://1ph1hf8043323.vicp.fun/api") == "http://111.229.202.251/api"
+    assert migrate_public_license_base("http://111.229.202.251:8687/api") == "http://111.229.202.251/api"
+    assert migrate_public_license_base("http://111.229.202.251/api") == "http://111.229.202.251/api"
 
 
 def test_jane_bases_list_and_explicit_fallback(monkeypatch):

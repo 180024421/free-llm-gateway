@@ -22,7 +22,7 @@ cd E:\xiangmu\dashuai-gateway-main\dashuai-gateway-main
 
 面板：http://127.0.0.1:8010/ui/
 
-授权服务默认对接花生壳 HTTPS：`https://1ph1hf8043323.vicp.fun/api`（见 `data/config.example.json`）。
+授权服务默认对接公网 IP：`http://111.229.202.251/api`（见 `data/config.example.json`）。
 
 ## 产品形态
 
@@ -36,7 +36,7 @@ cd E:\xiangmu\dashuai-gateway-main\dashuai-gateway-main
 | Android APK | `clients/android/` | 局域网 bootstrap 自动提示网关地址 |
 | WorkBuddy | 面板「同步 WorkBuddy」 | 写入 11 类用途 + 本地 Key |
 
-公网教程（Win/Mac 分 Tab）：https://1ph1hf8043323.vicp.fun/guides/dashuai-gateway-start/
+公网教程（Win/Mac 分 Tab）：http://111.229.202.251/guides/dashuai-gateway-start/
 
 ## 打 Windows EXE
 

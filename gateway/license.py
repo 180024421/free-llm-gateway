@@ -31,7 +31,7 @@ from .config import DATA_DIR, load_config, save_json, load_json
 SESSION_PATH = DATA_DIR / "session.json"
 _SECRET_PATH_NAME = ".license_hmac"
 _MACHINE_ID_FILE = "machine-id"
-_VICP_FALLBACK_BASE = "http://111.229.202.251:8687/api"
+_VICP_FALLBACK_BASE = "http://111.229.202.251/api"
 _refresh_ts = 0.0
 _REFRESH_INTERVAL = 300.0
 
@@ -442,10 +442,15 @@ async def jane_request(
             if 400 <= e.status_code < 500:
                 raise
             last_exc = e
-        except (httpx.TimeoutException, httpx.ConnectError, httpx.NetworkError, httpx.ReadError) as e:
+        except (httpx.TimeoutException, httpx.ConnectError, httpx.NetworkError, httpx.ReadError, httpx.RemoteProtocolError) as e:
             last_exc = HTTPException(status_code=503, detail=str(e) or "网络错误")
         except Exception as e:
-            last_exc = HTTPException(status_code=503, detail=str(e) or "授权服务不可用")
+            # httpx 其它传输层错误也换线路重试，避免只显示 “Server disconnected…”
+            name = type(e).__name__
+            if "Protocol" in name or "Timeout" in name or "Connect" in name or "Network" in name or "Read" in name:
+                last_exc = HTTPException(status_code=503, detail=str(e) or "网络错误")
+            else:
+                last_exc = HTTPException(status_code=503, detail=str(e) or "授权服务不可用")
 
     if last_exc:
         raise last_exc

@@ -10,30 +10,39 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse, urlunparse
 
-PUBLIC_LICENSE_API_BASE = "https://1ph1hf8043323.vicp.fun/api"
+PUBLIC_LICENSE_API_BASE = "http://111.229.202.251/api"
+# 公网统一走 IP HTTP（Nginx:80）；花生壳域名已弃用
+PUBLIC_LICENSE_API_BASE_HTTPS = "http://111.229.202.251/api"
 _PUBLIC_HOST_RE = re.compile(
-    r"https?://(?:111\.229\.202\.251(?::8687)?|1ph1hf8043323\.vicp\.fun:8687)",
+    # 只改写直连 Java :8687，不要把 nginx :80 的 IP 入口误改
+    r"https?://(?:111\.229\.202\.251:8687|1ph1hf8043323\.vicp\.fun:8687)(?=/|$)",
     re.IGNORECASE,
 )
 
 
 def migrate_public_license_base(url: str) -> str:
-    """Rewrite legacy public IP / :8687 license endpoints to HTTPS peanut-shell domain."""
+    """Rewrite legacy peanut-shell / :8687 license endpoints to the current public API base."""
     raw = (url or "").strip()
     if not raw:
         return raw
-    next_url = _PUBLIC_HOST_RE.sub("https://1ph1hf8043323.vicp.fun", raw)
-    # Bare host without /api still OK if path already present; normalize common exact bases.
+    next_url = _PUBLIC_HOST_RE.sub("http://111.229.202.251", raw)
     lowered = next_url.rstrip("/").lower()
     if lowered in {
         "https://1ph1hf8043323.vicp.fun",
         "http://1ph1hf8043323.vicp.fun",
         "https://1ph1hf8043323.vicp.fun/api",
         "http://1ph1hf8043323.vicp.fun/api",
+        "http://111.229.202.251",
+        "https://111.229.202.251",
+        "http://111.229.202.251/api",
+        "https://111.229.202.251/api",
     }:
         return PUBLIC_LICENSE_API_BASE
+    # 花生壳域名一律落到可用的 HTTP IP 入口
+    if "1ph1hf8043323.vicp.fun" in lowered:
+        return PUBLIC_LICENSE_API_BASE
     if next_url.lower().startswith("http://1ph1hf8043323.vicp.fun"):
-        next_url = "https://" + next_url[7:]
+        return PUBLIC_LICENSE_API_BASE
     return next_url
 
 
