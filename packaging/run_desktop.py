@@ -55,6 +55,134 @@ def _hide_console() -> None:
         pass
 
 
+# Real quit vs hide-to-tray (macOS menu bar / window close box)
+_FORCE_QUIT = False
+_STATUS_KEEPALIVE: list[object] = []
+
+
+def _request_quit() -> None:
+    global _FORCE_QUIT
+    _FORCE_QUIT = True
+    try:
+        import webview
+
+        for w in list(webview.windows or []):
+            try:
+                w.destroy()
+            except Exception:
+                pass
+    except Exception:
+        pass
+    os._exit(0)
+
+
+def _mac_set_dock_visible(visible: bool) -> None:
+    """Show/hide Dock icon. Accessory = menu-bar only (no Dock slot)."""
+    if sys.platform != "darwin":
+        return
+    try:
+        from AppKit import (
+            NSApplication,
+            NSApplicationActivationPolicyAccessory,
+            NSApplicationActivationPolicyRegular,
+        )
+
+        app = NSApplication.sharedApplication()
+        if visible:
+            app.setActivationPolicy_(NSApplicationActivationPolicyRegular)
+            app.activateIgnoringOtherApps_(True)
+        else:
+            app.setActivationPolicy_(NSApplicationActivationPolicyAccessory)
+    except Exception as exc:
+        _log(f"mac dock policy failed: {exc!r}")
+
+
+def _show_window(window) -> None:
+    try:
+        if sys.platform == "darwin":
+            _mac_set_dock_visible(True)
+        window.show()
+    except Exception:
+        pass
+    try:
+        window.restore()
+    except Exception:
+        pass
+    try:
+        if sys.platform == "darwin":
+            from AppKit import NSApplication
+
+            NSApplication.sharedApplication().activateIgnoringOtherApps_(True)
+    except Exception:
+        pass
+
+
+def _hide_to_menubar(window) -> None:
+    """Hide main window and drop Dock icon; keep top-right menu bar item."""
+    try:
+        window.hide()
+    except Exception:
+        pass
+    if sys.platform == "darwin":
+        _mac_set_dock_visible(False)
+
+
+def _show_or_hide(window, hide: bool = False) -> None:
+    try:
+        if hide:
+            _hide_to_menubar(window)
+        else:
+            _show_window(window)
+    except Exception:
+        pass
+
+
+def _setup_mac_menubar(window, title: str) -> None:
+    """Top-right menu-bar status item: 显示窗口 / 退出. Uses PyObjC from pywebview."""
+    if sys.platform != "darwin":
+        return
+    try:
+        from AppKit import (
+            NSMenu,
+            NSMenuItem,
+            NSStatusBar,
+            NSVariableStatusItemLength,
+        )
+        from Foundation import NSObject
+    except Exception as exc:
+        _log(f"mac menubar unavailable: {exc!r}")
+        return
+
+    class _MenuTarget(NSObject):
+        def showWindow_(self, _sender):  # noqa: N802
+            _show_window(window)
+
+        def quitApp_(self, _sender):  # noqa: N802
+            _request_quit()
+
+    try:
+        target = _MenuTarget.alloc().init()
+        status = NSStatusBar.systemStatusBar().statusItemWithLength_(NSVariableStatusItemLength)
+        button = status.button()
+        if button is not None:
+            # Short label fits menu bar; tooltip carries full name
+            button.setTitle_("大帅")
+            button.setToolTip_(title)
+        menu = NSMenu.alloc().init()
+        show_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_("显示窗口", "showWindow:", "")
+        show_item.setTarget_(target)
+        menu.addItem_(show_item)
+        quit_item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_("退出网关", "quitApp:", "")
+        quit_item.setTarget_(target)
+        menu.addItem_(quit_item)
+        status.setMenu_(menu)
+        # Keep ObjC objects alive for process lifetime
+        _STATUS_KEEPALIVE.extend([target, status, menu, show_item, quit_item])
+        _log("mac menubar ready")
+    except Exception as exc:
+        _log(f"mac menubar setup failed: {exc!r}")
+
+
 def _silence_stdio() -> None:
     """Avoid print/logging crashes if stdio is missing or redirected."""
     if not getattr(sys, "frozen", False):
@@ -254,16 +382,23 @@ def _merge_license_defaults(data_dir: Path, bundled_example: Path) -> None:
         except Exception:
             pass
         # 仅在未显式允许明文 HTTP 时，才把公网 http 升到 https
+        # 注意：裸 IP 目前只有 HTTP（无证书），绝不能自动升 https，否则升级后授权全挂
         allow_http = bool(cfg.get("license_allow_insecure_http"))
         if base.lower().startswith("http://") and not allow_http:
             from urllib.parse import urlparse, urlunparse
 
             p = urlparse(base)
             host = (p.hostname or "").lower()
-            if host not in {"127.0.0.1", "localhost", "::1"}:
+            is_ip = bool(host) and host.replace(".", "").isdigit()
+            if host in {"127.0.0.1", "localhost", "::1"} or is_ip:
+                # 本机 / 裸 IP：保留 http，并记下允许明文，避免下次再被改写
+                if is_ip and cfg.get("license_allow_insecure_http") is not True:
+                    cfg["license_allow_insecure_http"] = True
+                    changed = True
+            else:
                 cfg["license_api_base"] = urlunparse(("https", p.netloc, p.path, p.params, p.query, p.fragment))
                 changed = True
-        # 允许明文时：仅裸 IP/本机可降为 http；域名（花生壳）保持 https
+        # 允许明文时：仅裸 IP/本机可降为 http；域名保持 https
         if allow_http and base.lower().startswith("https://"):
             from urllib.parse import urlparse, urlunparse
 
@@ -273,8 +408,7 @@ def _merge_license_defaults(data_dir: Path, bundled_example: Path) -> None:
             if host in {"127.0.0.1", "localhost", "::1"} or is_ip:
                 cfg["license_api_base"] = urlunparse(("http", p.netloc, p.path, p.params, p.query, p.fragment))
                 changed = True
-        if not changed:
-            changed = True  # still persist commercial_mode defaults set above
+        # persist commercial_mode / setdefault 等改动
         changed = True
     if changed:
         target.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -563,14 +697,48 @@ def main() -> None:
         text_select=True,
     )
 
-    def _on_closed() -> None:
-        # Force-exit so daemon uvicorn thread cannot keep process alive
-        os._exit(0)
+    def _on_closing() -> bool:
+        # Close box → hide to top-right menu bar (no Dock slot). Quit via menu「退出网关」.
+        if _FORCE_QUIT:
+            return True
+        if sys.platform == "darwin":
+            try:
+                threading.Thread(target=lambda: _hide_to_menubar(window), daemon=True).start()
+            except Exception:
+                try:
+                    _hide_to_menubar(window)
+                except Exception:
+                    pass
+            return False
+        return True
 
+    def _on_minimized() -> None:
+        # Yellow minimize also goes to menu bar, not Dock miniaturize
+        if sys.platform == "darwin" and not _FORCE_QUIT:
+            try:
+                threading.Thread(target=lambda: _hide_to_menubar(window), daemon=True).start()
+            except Exception:
+                pass
+
+    def _on_closed() -> None:
+        if _FORCE_QUIT or sys.platform != "darwin":
+            os._exit(0)
+
+    try:
+        window.events.closing += _on_closing
+    except Exception:
+        pass
+    try:
+        window.events.minimized += _on_minimized
+    except Exception:
+        pass
     try:
         window.events.closed += _on_closed
     except Exception:
         pass
+
+    if sys.platform == "darwin":
+        _setup_mac_menubar(window, f"{__product__} v{__version__}")
 
     # Windows: WebView2；macOS: 系统 WKWebView（与 EXE 一样是独立窗口，不是浏览器）
     threading.Thread(target=_token_low_watcher, args=(port,), daemon=True, name="dashuai-token-watch").start()

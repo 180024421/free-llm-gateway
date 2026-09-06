@@ -1,6 +1,7 @@
 #!/bin/bash
 # 大帅网关 Mac 便携启动（务必整夹保留：app / runtime / wheels）
 # 兼容：bash / 被 zsh 误执行 / Rosetta / 解压丢执行位
+# 启动后会脱离 Terminal：终端窗口可关掉，网关继续在菜单栏运行
 
 # 若不是 bash，强制用系统 bash 重跑（避免 zsh+nounset 报 ARCH?）
 if [ -z "${BASH_VERSION-}" ]; then
@@ -101,11 +102,45 @@ else
 fi
 
 mkdir -p "$ROOT/data"
+# 只在缺失时从模板复制，绝不覆盖用户已有 config/providers/routers
 for name in config providers routers; do
   if [ ! -f "$ROOT/data/${name}.json" ] && [ -f "$APP/data/${name}.example.json" ]; then
     cp "$APP/data/${name}.example.json" "$ROOT/data/${name}.json"
   fi
 done
+# 若 data 几乎是空的但旁边有旧版备份，提示用户（不自动覆盖，避免误伤）
+if [ ! -f "$ROOT/data/providers.json" ] && [ ! -f "$ROOT/data/session.json" ]; then
+  for cand in "$ROOT/../大帅网关-mac-arm64/data" "$ROOT/../大帅网关-mac-arm64.bak/data" "$ROOT/../大帅网关-mac-arm64-旧/data"; do
+    if [ -f "$cand/providers.json" ] || [ -f "$cand/session.json" ]; then
+      echo "[大帅网关] 检测到可能的旧配置：$cand"
+      echo "[大帅网关] 如需保留 API Key/登录态，请把该目录复制为：$ROOT/data"
+      break
+    fi
+  done
+fi
 
 cd "$APP"
+
+# 默认后台启动并脱离 Terminal：关掉终端窗口不影响网关
+# 调试可：DASHUAI_FOREGROUND=1 /bin/bash 启动大帅网关.command
+if [ "${DASHUAI_FOREGROUND-}" != "1" ]; then
+  echo "[大帅网关] 正在后台启动独立窗口（可关掉本终端）…"
+  nohup "$VENV/bin/python" -c "from packaging.run_desktop import main; main()" \
+    >>"$ROOT/data/desktop.log" 2>&1 &
+  disown >/dev/null 2>&1 || true
+  # 稍等窗口起来；失败时用户可看 data/desktop.log
+  sleep 1
+  # 关闭本次 .command 打开的 Terminal 窗口（不影响用户其它终端）
+  /usr/bin/osascript >/dev/null 2>&1 <<'APPLESCRIPT' || true
+tell application "Terminal"
+  try
+    if (count of windows) > 0 then
+      close front window
+    end if
+  end try
+end tell
+APPLESCRIPT
+  exit 0
+fi
+
 exec "$VENV/bin/python" -c "from packaging.run_desktop import main; main()"

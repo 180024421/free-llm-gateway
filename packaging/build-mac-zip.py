@@ -364,6 +364,9 @@ def build_one(arch: str, tag: str, py_ver: str) -> Path:
     text = launcher_src.read_text(encoding="utf-8").replace("\r\n", "\n").replace("\r", "\n")
     launcher_dst.write_text(text, encoding="utf-8", newline="\n")
     shutil.copy2(readme_src, bundle / "首次打开说明.txt")
+    upgrade_src = ROOT / "packaging" / "mac" / "升级保留配置.txt"
+    if upgrade_src.exists():
+        shutil.copy2(upgrade_src, bundle / "升级保留配置.txt")
 
     (bundle / "data").mkdir(exist_ok=True)
 
