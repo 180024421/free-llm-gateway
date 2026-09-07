@@ -291,5 +291,277 @@
     "quota_tier": "signup",
     "weight": 7,
     "enabled": false
+  },
+  {
+    "name": "AgentRouter",
+    "base_url": "https://agentrouter.org/v1",
+    "api_key": "",
+    "models": [
+      "gpt-4o-mini",
+      "gpt-4o",
+      "deepseek-chat",
+      "claude-3-5-sonnet-20241022"
+    ],
+    "disabled_models": [],
+    "free_only": true,
+    "quota_tier": "signup",
+    "weight": 12,
+    "enabled": false
+  },
+  {
+    "name": "DoCode",
+    "base_url": "https://docode.cc/v1",
+    "api_key": "",
+    "models": [
+      "gpt-4o-mini",
+      "gpt-4o",
+      "deepseek-chat",
+      "claude-3-5-sonnet-20241022"
+    ],
+    "disabled_models": [],
+    "free_only": true,
+    "quota_tier": "signup",
+    "weight": 11,
+    "enabled": false
+  },
+  {
+    "name": "SeekAI",
+    "base_url": "https://seekai.cc/v1",
+    "api_key": "",
+    "models": [
+      "gpt-4o-mini",
+      "gpt-4o",
+      "deepseek-chat",
+      "claude-3-5-sonnet-20241022"
+    ],
+    "disabled_models": [],
+    "free_only": true,
+    "quota_tier": "signup",
+    "weight": 13,
+    "enabled": false
+  },
+  {
+    "name": "GoRouter",
+    "base_url": "https://gorouter.app/v1",
+    "api_key": "",
+    "models": [
+      "gpt-4o-mini",
+      "gpt-4o",
+      "deepseek-chat",
+      "claude-3-5-sonnet-20241022"
+    ],
+    "disabled_models": [],
+    "free_only": true,
+    "quota_tier": "signup",
+    "weight": 10,
+    "enabled": false
+  },
+  {
+    "name": "API456",
+    "base_url": "https://gpt.api456.me/v1",
+    "api_key": "",
+    "models": [
+      "gpt-4o-mini",
+      "gpt-4o",
+      "deepseek-chat",
+      "claude-3-5-sonnet-20241022"
+    ],
+    "disabled_models": [],
+    "free_only": true,
+    "quota_tier": "signup",
+    "weight": 9,
+    "enabled": false
+  },
+  {
+    "name": "Sulmate",
+    "base_url": "https://free.sulmate.cn/v1",
+    "api_key": "",
+    "models": [
+      "gpt-4o-mini",
+      "gpt-4o",
+      "deepseek-chat",
+      "claude-3-5-sonnet-20241022"
+    ],
+    "disabled_models": [],
+    "free_only": true,
+    "quota_tier": "signup",
+    "weight": 9,
+    "enabled": false
+  },
+  {
+    "name": "TokenRhythm",
+    "base_url": "https://tokenrhythm.studio/v1",
+    "api_key": "",
+    "models": [
+      "gpt-4o-mini",
+      "gpt-4o",
+      "deepseek-chat",
+      "claude-3-5-sonnet-20241022"
+    ],
+    "disabled_models": [],
+    "free_only": true,
+    "quota_tier": "signup",
+    "weight": 10,
+    "enabled": false
+  },
+  {
+    "name": "TabiToken",
+    "base_url": "https://tabitoken.com/v1",
+    "api_key": "",
+    "models": [
+      "gpt-4o-mini",
+      "gpt-4o",
+      "deepseek-chat",
+      "claude-3-5-sonnet-20241022"
+    ],
+    "disabled_models": [],
+    "free_only": true,
+    "quota_tier": "signup",
+    "weight": 11,
+    "enabled": false
+  },
+  {
+    "name": "Beizhi",
+    "base_url": "https://beizhi.sylu.cc/v1",
+    "api_key": "",
+    "models": [
+      "gpt-4o-mini",
+      "gpt-4o",
+      "deepseek-chat",
+      "claude-3-5-sonnet-20241022"
+    ],
+    "disabled_models": [],
+    "free_only": true,
+    "quota_tier": "signup",
+    "weight": 9,
+    "enabled": false
+  },
+  {
+    "name": "Kscsnkli AI",
+    "base_url": "https://ai.kscsnkli.site/v1",
+    "api_key": "",
+    "models": [
+      "gpt-4o-mini",
+      "gpt-4o",
+      "deepseek-chat",
+      "claude-3-5-sonnet-20241022"
+    ],
+    "disabled_models": [],
+    "free_only": true,
+    "quota_tier": "signup",
+    "weight": 14,
+    "enabled": false
+  },
+  {
+    "name": "TrueSota",
+    "base_url": "https://true-sota.com/v1",
+    "api_key": "",
+    "models": [
+      "gpt-4o-mini",
+      "gpt-4o",
+      "deepseek-chat",
+      "claude-3-5-sonnet-20241022"
+    ],
+    "disabled_models": [],
+    "free_only": true,
+    "quota_tier": "signup",
+    "weight": 8,
+    "enabled": false
+  },
+  {
+    "name": "JustWoker",
+    "base_url": "https://api.justwoker.icu/v1",
+    "api_key": "",
+    "models": [
+      "gpt-4o-mini",
+      "gpt-4o",
+      "deepseek-chat",
+      "claude-3-5-sonnet-20241022"
+    ],
+    "disabled_models": [],
+    "free_only": true,
+    "quota_tier": "signup",
+    "weight": 10,
+    "enabled": false
+  },
+  {
+    "name": "GemAI",
+    "base_url": "https://api.gemai.cc/v1",
+    "api_key": "",
+    "models": [
+      "gpt-4o-mini",
+      "gpt-4o",
+      "deepseek-chat",
+      "claude-3-5-sonnet-20241022"
+    ],
+    "disabled_models": [],
+    "free_only": true,
+    "quota_tier": "signup",
+    "weight": 13,
+    "enabled": false
+  },
+  {
+    "name": "Mcjdai",
+    "base_url": "https://www.mcjdai.com/v1",
+    "api_key": "",
+    "models": [
+      "gpt-4o-mini",
+      "gpt-4o",
+      "deepseek-chat",
+      "claude-3-5-sonnet-20241022"
+    ],
+    "disabled_models": [],
+    "free_only": true,
+    "quota_tier": "signup",
+    "weight": 10,
+    "enabled": false
+  },
+  {
+    "name": "MeAPI",
+    "base_url": "https://meapi.space/v1",
+    "api_key": "",
+    "models": [
+      "gpt-4o-mini",
+      "gpt-4o",
+      "deepseek-chat",
+      "claude-3-5-sonnet-20241022"
+    ],
+    "disabled_models": [],
+    "free_only": true,
+    "quota_tier": "signup",
+    "weight": 11,
+    "enabled": false
+  },
+  {
+    "name": "Wlaicc",
+    "base_url": "https://wlaicc.cc/v1",
+    "api_key": "",
+    "models": [
+      "gpt-4o-mini",
+      "gpt-4o",
+      "deepseek-chat",
+      "claude-3-5-sonnet-20241022"
+    ],
+    "disabled_models": [],
+    "free_only": true,
+    "quota_tier": "signup",
+    "weight": 11,
+    "enabled": false
+  },
+  {
+    "name": "AnyRouter",
+    "base_url": "https://anyrouter.top/v1",
+    "api_key": "",
+    "models": [
+      "gpt-4o-mini",
+      "gpt-4o",
+      "deepseek-chat",
+      "claude-3-5-sonnet-20241022"
+    ],
+    "disabled_models": [],
+    "free_only": true,
+    "quota_tier": "free",
+    "weight": 4,
+    "enabled": false
   }
 ]

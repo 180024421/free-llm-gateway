@@ -174,7 +174,7 @@ PROFILES: list[RouteProfile] = [
     RouteProfile(
         "日常",
         "daily",
-        "综合日常：日额度/强模型优先，免费小杯兜底（最多12个）",
+        "大杯优先，失败后可用免费小杯兜底",
         lambda m: not is_non_chat_model(m),
         ROUTE_ALIASES["日常"],
         reliability_w=0.40,
@@ -196,7 +196,7 @@ PROFILES: list[RouteProfile] = [
     RouteProfile(
         "复杂",
         "complex",
-        "复杂任务：高准确度大杯优先，成功率过滤",
+        "仅大杯，无小杯兜底（适合 Skill）",
         _compile(r"397b", r"235b", r"122b", r"nemotron-3-super", r"v4-pro", r"pro", r"70b", r"glm-5", r"gemini", r"gpt-oss-120b", r"qwen-plus", r"qwen3\.8", r"qwen3\.7", r"qwen3\.6"),
         ROUTE_ALIASES["复杂"],
         reliability_w=0.35,
@@ -787,7 +787,7 @@ def build_smart_routers(
             cands = pool[:top_n]
         else:
             cands = pick_candidates(pool, profile, global_stats, route_stats, top_n=top_n)
-        if profile.cn in {"日常", "复杂", "推理", "代码", "长文"}:
+        if profile.cn in {"日常", "推理", "代码", "长文"}:
             cands = _apply_quality_then_free(cands)[:top_n]
             # 强制留 2～3 个免费小杯/池作末尾兜底（额度打满或大杯失败时）。
             free_tail = [
@@ -798,14 +798,26 @@ def build_smart_routers(
             if free_tail:
                 keep = max(0, top_n - len(free_tail))
                 cands = cands[:keep] + free_tail
+        if profile.cn == "复杂":
+            # 仅大杯：候选里去掉免费小杯，运行时也不 spillover。
+            cands = _apply_quality_then_free(cands)
+            cands = [m for m in cands if not _is_free_fallback_model(m)][:top_n]
         if profile.cn == "识图":
             cands = _apply_vision_preference(cands, providers)[:top_n]
         if profile.cn == "小说":
             # Novel: fewer hops, only proven models (max 6).
             cands = cands[: min(6, top_n)]
+        from .router import normalize_route_fallback
+
+        fallback = normalize_route_fallback(profile.cn)
+        if profile.cn == "日常":
+            fallback = "free_pool"
+        elif profile.cn == "复杂":
+            fallback = "none"
         meta = {
             "description": profile.description,
             "candidates": cands,
+            "fallback": fallback,
             "built_at": int(time.time()),
             "top_n": top_n,
             "weights": {
@@ -824,9 +836,18 @@ def build_smart_routers(
         routers["256k"] = {**routers["长文"], "description": "长上下文（同长文优选）"}
         routers["1m"] = {**routers["长文"], "description": "超长上下文（同长文优选）"}
     if "日常" in routers:
-        routers["auto"] = {**routers["日常"], "description": "同日常（快+准均衡优选）"}
+        routers["auto"] = {**routers["日常"], "description": "同日常（大杯优先，可小杯兜底）"}
 
     return routers
+
+
+def _builtin_route_keys() -> set[str]:
+    keys: set[str] = {"256k", "1m", "auto"}
+    for profile in PROFILES:
+        keys.add(profile.cn)
+        keys.add(profile.en)
+        keys |= set(profile.usage_keys or ())
+    return keys
 
 
 def rebuild_and_save(
@@ -841,7 +862,26 @@ def rebuild_and_save(
         apply_to_state(STATE)
     except Exception:
         pass
+    from .config import load_routers as _load_routers
+
+    previous = _load_routers()
     routers = build_smart_routers(providers, top_n=top_n)
+    # Preserve user-defined custom routes across smart rebuild.
+    builtin = _builtin_route_keys()
+    for key, meta in previous.items():
+        if key in routers:
+            continue
+        if str(key) in builtin:
+            continue
+        routers[key] = meta
+    # Keep per-route timeout/retry overrides on rebuilt built-ins.
+    for key, new_meta in list(routers.items()):
+        old = previous.get(key)
+        if not isinstance(old, dict) or not isinstance(new_meta, dict):
+            continue
+        for tk in ("request_timeout_sec", "stream_stall_sec", "max_retries"):
+            if old.get(tk) not in (None, "", 0, "0") and tk not in new_meta:
+                new_meta[tk] = old[tk]
     save_routers(routers)
     summary = []
     for profile in PROFILES:
@@ -851,6 +891,7 @@ def rebuild_and_save(
                 "route": profile.cn,
                 "count": len(cands),
                 "top": cands[:3],
+                "fallback": (routers.get(profile.cn) or {}).get("fallback"),
                 "weights": {
                     "reliability": profile.reliability_w,
                     "accuracy": profile.accuracy_w,
@@ -865,3 +906,29 @@ def rebuild_and_save(
         "top_n": top_n,
         "usage_files": [str(p) for p in _usage_files()],
     }
+
+
+def maybe_rebuild_and_save(
+    providers: list[dict[str, Any]] | None = None,
+    *,
+    top_n: int = TOP_N,
+    force: bool = False,
+) -> dict[str, Any]:
+    """Rebuild routes unless manual lock is on (unless force=True)."""
+    from .config import load_config, load_routers, save_config
+
+    cfg = load_config()
+    if not force and bool(cfg.get("routes_manual_lock")):
+        return {
+            "ok": True,
+            "skipped": True,
+            "reason": "routes_manual_lock",
+            "routes": load_routers(),
+        }
+    out = rebuild_and_save(providers, top_n=top_n)
+    if force:
+        cfg = load_config()
+        cfg["routes_manual_lock"] = True
+        save_config(cfg)
+        out["routes_manual_lock"] = True
+    return out

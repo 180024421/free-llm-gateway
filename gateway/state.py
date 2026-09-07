@@ -86,10 +86,34 @@ class RuntimeState:
     lock: threading.RLock = field(default_factory=threading.RLock)
     health: dict[str, ChannelHealth] = field(default_factory=dict)
     last_chat: dict[str, Any] | None = None
+    # Free-pool spillover visibility: request ids served by a fallback model
+    # (bounded), plus a process-lifetime counter for the dashboard.
+    fallback_request_ids: list[str] = field(default_factory=list)
+    fallback_hits: int = 0
 
     def note_last_chat(self, row: dict[str, Any]) -> None:
         with self.lock:
-            self.last_chat = dict(row or {})
+            row = dict(row or {})
+            rid = str(row.get("request_id") or "")
+            if rid and rid in self.fallback_request_ids:
+                row["fallback"] = "free-pool"
+            self.last_chat = row
+
+    def mark_fallback(self, request_id: str | None) -> None:
+        """Record that ``request_id`` was served by a free-pool spillover model.
+
+        Works regardless of whether note_last_chat already ran (non-stream) or
+        will run later (stream finishes after headers are sent).
+        """
+        rid = str(request_id or "")
+        with self.lock:
+            self.fallback_hits += 1
+            if rid:
+                self.fallback_request_ids.append(rid)
+                if len(self.fallback_request_ids) > 200:
+                    del self.fallback_request_ids[:-200]
+                if self.last_chat and str(self.last_chat.get("request_id") or "") == rid:
+                    self.last_chat["fallback"] = "free-pool"
 
     def key(self, provider: str, model: str) -> str:
         return f"{provider}::{model}"

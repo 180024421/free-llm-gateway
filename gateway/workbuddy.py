@@ -19,7 +19,7 @@ GATEWAY_URL_HINT = "127.0.0.1:8010"
 # request windows; huge windows burn free-tier tokens without improving answers.
 ROUTE_META: dict[str, dict[str, Any]] = {
     "日常": {
-        "name": "\u65e5\u5e38 \u00b7 \u5927\u5e05\u7f51\u5173",
+        "name": "\u65e5\u5e38 \u00b7 \u5927\u676f\u4f18\u5148\uff08\u53ef\u515c\u5e95\uff09",
         "supportsImages": True,
         "supportsReasoning": True,
         "defaultEffort": "low",
@@ -35,7 +35,7 @@ ROUTE_META: dict[str, dict[str, Any]] = {
         "maxOutputTokens": 6144,
     },
     "复杂": {
-        "name": "\u590d\u6742 \u00b7 \u5927\u5e05\u7f51\u5173",
+        "name": "\u590d\u6742 \u00b7 \u4ec5\u5927\u676f",
         "supportsImages": True,
         "supportsReasoning": True,
         "defaultEffort": "high",
@@ -122,6 +122,31 @@ PREFERRED_ORDER = [
     "长文",
     "Agent",
 ]
+
+
+def custom_route_ids(routers: dict[str, Any]) -> list[str]:
+    """Route ids that are neither built-in profiles nor their aliases, in file order.
+
+    Only routes with at least one candidate are returned (an empty custom route
+    would produce a client model that can never answer).
+    """
+    try:
+        from .route_builder import _builtin_route_keys
+
+        builtin = _builtin_route_keys()
+    except Exception:
+        builtin = set(PREFERRED_ORDER)
+    builtin = set(builtin) | set(PREFERRED_ORDER) | {"256k", "1m", "auto"}
+    out: list[str] = []
+    for rid, route in (routers or {}).items():
+        rid_s = str(rid or "").strip()
+        if not rid_s or rid_s in builtin or rid_s.lower() in builtin:
+            continue
+        cands = route.get("candidates") if isinstance(route, dict) else route
+        if not isinstance(cands, list) or not cands:
+            continue
+        out.append(rid_s)
+    return out
 
 
 def workbuddy_models_path() -> Path:
@@ -286,6 +311,10 @@ def build_workbuddy_models(cfg: dict[str, Any] | None = None, routers: dict[str,
         if cn not in order and en in routers:
             # still emit Chinese id (WorkBuddy UX) but read candidates from en
             order.append(cn)
+
+    # User-defined custom routes (面板「新增自定义路由」) must reach the client too,
+    # otherwise saving them in the panel has no visible effect in WorkBuddy.
+    order.extend(custom_route_ids(routers))
 
     models: list[dict[str, Any]] = []
     for rid in order:

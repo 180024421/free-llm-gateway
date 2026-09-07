@@ -239,19 +239,46 @@ def usage_summary(limit: int = 500, *, days: int | None = None) -> dict[str, Any
             bm["estimated"] = True
 
         br = by_route_map.setdefault(
-            route, {"route": route, "requests": 0, "ok": 0, "fail": 0, "pt": 0, "ct": 0, "tt": 0}
+            route,
+            {
+                "route": route,
+                "requests": 0,
+                "ok": 0,
+                "fail": 0,
+                "pt": 0,
+                "ct": 0,
+                "tt": 0,
+                "fallback": 0,
+                "_providers": {},
+                "_models": {},
+            },
         )
         br["requests"] += 1
         br["ok" if is_ok else "fail"] += 1
         br["pt"] += pt
         br["ct"] += ct
         br["tt"] += tt
+        fb = str(row.get("fallback") or "").strip().lower().replace("_", "-")
+        if fb in {"free-pool", "freepool"}:
+            br["fallback"] += 1
+        if is_ok:
+            provs = br["_providers"]
+            provs[p] = int(provs.get(p) or 0) + 1
+            mods = br["_models"]
+            mods[m] = int(mods.get(m) or 0) + 1
 
         if len(recent) < 20:
             recent.append(row)
 
     by_model = sorted(by_model_map.values(), key=lambda x: x["tt"], reverse=True)
-    by_route = sorted(by_route_map.values(), key=lambda x: x["requests"], reverse=True)
+    by_route_list: list[dict[str, Any]] = []
+    for br in by_route_map.values():
+        top_p = sorted(br.pop("_providers", {}).items(), key=lambda x: -x[1])[:3]
+        top_m = sorted(br.pop("_models", {}).items(), key=lambda x: -x[1])[:3]
+        br["top_providers"] = [{"name": k, "ok": v} for k, v in top_p]
+        br["top_models"] = [{"name": k, "ok": v} for k, v in top_m]
+        by_route_list.append(br)
+    by_route = sorted(by_route_list, key=lambda x: x["requests"], reverse=True)
     by_day = sorted(by_day_map.values(), key=lambda x: x["day"])
     avg_latency = round(sum(latencies) / len(latencies), 1) if latencies else None
     total = len(rows)
@@ -296,6 +323,29 @@ def usage_for_ui(days: int = 1) -> dict[str, Any]:
         "fail": raw.get("fail") or 0,
         "recent": raw.get("recent") or [],
     }
+
+
+def route_hit_stats(days: int = 1) -> dict[str, Any]:
+    """Per-route hit summary for the routes panel (last N days)."""
+    raw = usage_summary(limit=0, days=max(1, int(days)))
+    routes = raw.get("by_route") or []
+    by_id: dict[str, Any] = {}
+    for item in routes:
+        if not isinstance(item, dict):
+            continue
+        rid = str(item.get("route") or "").strip()
+        if not rid:
+            continue
+        by_id[rid] = {
+            "route": rid,
+            "requests": int(item.get("requests") or 0),
+            "ok": int(item.get("ok") or 0),
+            "fail": int(item.get("fail") or 0),
+            "fallback": int(item.get("fallback") or 0),
+            "top_providers": item.get("top_providers") or [],
+            "top_models": item.get("top_models") or [],
+        }
+    return {"days": max(1, int(days)), "routes": by_id}
 
 
 def call_log(limit: int = 100, *, route: str | None = None) -> list[dict[str, Any]]:
@@ -607,7 +657,7 @@ def is_daily_route(client_model: str) -> bool:
 
 
 def is_snappy_route(client_model: str) -> bool:
-    """Routes that should race candidates and prefer low-latency models."""
+    """Low-latency UX routes (timeouts/reasoning). Hedging is only for is_fast_route."""
     return is_fast_route(client_model) or is_daily_route(client_model)
 
 
@@ -937,6 +987,7 @@ async def forward_chat(
     stream: bool,
     stall_sec: float = 15.0,
     client_request_id: str | None = None,
+    spillover: bool = False,
 ) -> tuple[httpx.Response | None, AsyncIterator[bytes] | None, dict[str, Any]]:
     """Call upstream chat/completions. Returns (response, stream_iter, meta)."""
     name = provider.get("name") or "unknown"
@@ -982,23 +1033,32 @@ async def forward_chat(
         "url": url,
         "request_id": (client_request_id or upstream_req_id),
         "upstream_request_id": upstream_req_id,
+        "spillover": bool(spillover),
     }
+
+    def _usage_extra() -> dict[str, Any]:
+        extra: dict[str, Any] = {"request_id": meta.get("request_id")}
+        if spillover:
+            extra["fallback"] = "free-pool"
+        return extra
 
     def _remember_ok() -> None:
         try:
             from .meta import strip_route_display as _strip
 
-            STATE.note_last_chat(
-                {
-                    "ts": time.time(),
-                    "route": _strip(client_model),
-                    "client_model": client_model,
-                    "display_model": display_model,
-                    "provider": name,
-                    "upstream_model": upstream_model,
-                    "latency_ms": meta.get("latency_ms"),
-                }
-            )
+            row = {
+                "ts": time.time(),
+                "route": _strip(client_model),
+                "client_model": client_model,
+                "display_model": display_model,
+                "provider": name,
+                "upstream_model": upstream_model,
+                "latency_ms": meta.get("latency_ms"),
+                **_usage_extra(),
+            }
+            if spillover:
+                row["fallback"] = "free-pool"
+            STATE.note_last_chat(row)
         except Exception:
             pass
 
@@ -1034,7 +1094,7 @@ async def forward_chat(
                         "latency_ms": meta.get("latency_ms"),
                         "ok": False,
                         "error": f"HTTP {resp.status_code}",
-                        "request_id": meta.get("request_id"),
+                        **_usage_extra(),
                         "content_chars": 0,
                     }
                 )
@@ -1085,7 +1145,7 @@ async def forward_chat(
                         "latency_ms": meta.get("latency_ms"),
                         "ok": False,
                         "error": err,
-                        "request_id": meta.get("request_id"),
+                        **_usage_extra(),
                         "content_chars": int(getattr(rewriter, "content_chars", 0) or 0),
                     }
                 )
@@ -1160,7 +1220,7 @@ async def forward_chat(
                                 "latency_ms": meta.get("latency_ms"),
                                 "ok": True,
                                 "usage": rewriter.last_usage or {},
-                                "request_id": meta.get("request_id"),
+                                **_usage_extra(),
                                 "content_chars": rewriter.content_chars,
                             }
                         )
@@ -1237,7 +1297,7 @@ async def forward_chat(
                             "ok": stream_ok,
                             "error": stream_err or None,
                             "usage": rewriter.last_usage or {},
-                            "request_id": meta.get("request_id"),
+                            **_usage_extra(),
                             "content_chars": rewriter.content_chars,
                         }
                     )
@@ -1289,7 +1349,7 @@ async def forward_chat(
                 "latency_ms": meta.get("latency_ms"),
                 "ok": True,
                 "usage": usage,
-                "request_id": meta.get("request_id"),
+                **_usage_extra(),
             }
         )
         meta["_raw"] = data if data is not None else resp.text

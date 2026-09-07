@@ -31,6 +31,7 @@ def test_balance_fail_quarantines_whole_provider(monkeypatch):
 
     monkeypatch.setattr("gateway.router.STATE", state)
     monkeypatch.setattr("gateway.state.STATE", state)
+    monkeypatch.setattr("gateway.config.load_config", lambda: {"cn_only": False})
 
     providers = [
         {

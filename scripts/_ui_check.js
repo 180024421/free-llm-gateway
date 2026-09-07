@@ -3,8 +3,12 @@ const state = {
   overview: null,
   providers: [],
   routes: {},
+  cupLabels: {},
+  routeStats: {},
   localKey: localStorage.getItem("dashuai_local_key") || "sk-local-change-me",
   dirtyProviders: false,
+  dirtyRoutes: false,
+  routesManualLock: false,
   openProvider: 0,
   usageDays: 1,
 };
@@ -416,7 +420,12 @@ async function saveAdvancedSettings(){
     ["#cnOnlyToggle", "#cnOnlyToggle2"].forEach(sel => { const el = $(sel); if (el && cn) el.checked = !!cn.checked; });
     const r = await fetch("/api/config", { method: "PUT", headers: authHeaders(), body: JSON.stringify(cur) });
     if (!r.ok) throw new Error("save");
-    try { await fetch("/api/routers/rebuild-smart", { method: "POST", headers: authHeaders() }); } catch (_) {}
+    try {
+      const locked = !!(cur.routes_manual_lock);
+      if (!locked) {
+        await fetch("/api/routers/rebuild-smart?force=1", { method: "POST", headers: authHeaders() });
+      }
+    } catch (_) {}
     toast("高级设置已保存");
     const hint = $("#cnOnlyHint");
     if (hint && cn) {
@@ -532,9 +541,13 @@ function cursorSnippet(base, key){
 function go(page){
   const cur = document.querySelector(".page.active");
   const leavingProviders = cur && cur.id === "page-providers" && page !== "providers";
+  const leavingRoutes = cur && cur.id === "page-routes" && page !== "routes";
   if (leavingProviders && state.dirtyProviders) {
     toast("上游渠道有未保存修改，请先点「保存全部」", true);
     // 仍允许切换，但不触发会覆盖本地编辑的 refresh
+  }
+  if (leavingRoutes && state.dirtyRoutes) {
+    if (!confirm("路由有未保存修改，确定离开？未保存内容可能丢失。")) return;
   }
   $$(".nav button[data-page]").forEach(b => b.classList.toggle("active", b.dataset.page === page));
   $$(".page").forEach(p => p.classList.toggle("active", p.id === `page-${page}`));
@@ -550,6 +563,7 @@ function go(page){
   // dirty 时 refresh 也会跳过 providers，这里照常刷监控即可
   if (page === "monitor") refresh();
   if (page === "providers") renderProviders();
+  if (page === "routes") renderRoutes();
 }
 
 function esc(s){
@@ -640,9 +654,16 @@ function renderHome(j){
     lastEl.textContent = last.display_model || (last.provider && last.upstream_model ? `${last.provider}/${last.upstream_model}` : "—");
   }
   if (lastHint) {
-    lastHint.textContent = last.latency_ms != null
-      ? `延迟 ${Math.round(last.latency_ms)} ms · 选「日常 · 大帅网关」即可`
-      : "发一次对话后这里会显示实际上游";
+    const fbHits = Number(j.fallback_hits || 0);
+    if (last.fallback === "free-pool") {
+      lastHint.textContent = `⚠ 本次由免费小杯兜底（候选大杯全部失败）· 本次运行共 ${fbHits} 次，请检查上游 Key / 额度`;
+      lastHint.style.color = "var(--warn, #f0b429)";
+    } else {
+      lastHint.style.color = "";
+      lastHint.textContent = last.latency_ms != null
+        ? `延迟 ${Math.round(last.latency_ms)} ms` + (fbHits ? ` · 本次运行兜底 ${fbHits} 次` : " · 选「日常 · 大帅网关」即可")
+        : "发一次对话后这里会显示实际上游";
+    }
   }
   $("#navVer").textContent = `v${j.version || "—"}`;
   if (window.__dashuaiSetAboutVersion) window.__dashuaiSetAboutVersion(j.version || "");
@@ -1166,32 +1187,173 @@ function renderProviders(){
   });
 }
 
+function routeFallbackOf(id, meta){
+  const m = meta || {};
+  const fb = String(m.fallback || "").toLowerCase();
+  if (fb === "none" || fb === "free_pool") return fb;
+  if (id === "复杂" || id === "complex" || id === "推理" || id === "reasoning") return "none";
+  return "free_pool";
+}
+
+function paintRoutesLockUI(){
+  const on = !!state.routesManualLock;
+  const t = $("#routesLockToggle");
+  if (t) t.checked = on;
+  const chip = $("#routesLockChip");
+  if (chip) chip.style.display = on ? "" : "none";
+  const dirty = $("#routesDirty");
+  if (dirty) dirty.classList.toggle("show", !!state.dirtyRoutes);
+}
+
+function markRoutesDirty(){
+  state.dirtyRoutes = true;
+  paintRoutesLockUI();
+}
+
+function cupLabelOf(model){
+  const m = String(model || "").trim();
+  if (!m) return "mid";
+  const fromServer = (state.cupLabels || {})[m];
+  if (fromServer) return fromServer;
+  // client-side fallback (same spirit as gateway route_builder)
+  if (/:free\b|openrouter\/free|\b4b\b|\b7b\b|\b8b\b|lite|mini|instant|nemo(?!tron)|flash-lite|allam-2|lfm-|llm7|kilo-auto/i.test(m)
+      && !/nemotron-3-super.*:free|glm-5\.2:free|gpt-oss-120b/i.test(m)) {
+    return "free";
+  }
+  if (/pro|plus|max|ultra|72b|120b|405b|opus|sonnet|gpt-4|claude-3|deepseek-r1|qwen3-?max|glm-4\.|kimi|seed/i.test(m)) {
+    return "big";
+  }
+  return "mid";
+}
+
+function cupChipText(cup){
+  if (cup === "free") return "小杯";
+  if (cup === "big") return "大杯";
+  return "中杯";
+}
+
+function availableModelsForPicker(){
+  const seen = new Set();
+  const out = [];
+  for (const p of (state.providers || [])) {
+    for (const m of (p.models || [])) {
+      const name = String(m || "").trim();
+      if (!name || seen.has(name.toLowerCase())) continue;
+      seen.add(name.toLowerCase());
+      out.push(name);
+    }
+  }
+  out.sort((a, b) => {
+    const rank = { big: 0, mid: 1, free: 2 };
+    return (rank[cupLabelOf(a)] - rank[cupLabelOf(b)]) || a.localeCompare(b);
+  });
+  return out;
+}
+
+function formatRouteStatsLine(id){
+  const st = (state.routeStats || {})[id];
+  if (!st || !st.requests) return `<p class="desc" style="margin-top:6px;opacity:.75">近 24h 暂无命中记录</p>`;
+  const topM = (st.top_models || []).slice(0, 2).map(x => x.name).join(" / ") || "—";
+  const topP = (st.top_providers || []).slice(0, 2).map(x => x.name).join(" / ") || "—";
+  const fb = Number(st.fallback || 0);
+  const fbPart = fb ? ` · <span style="color:var(--warn)">兜底 ${fb} 次</span>` : "";
+  return `<p class="desc" style="margin-top:6px">近 24h：${st.ok || 0}/${st.requests} 成功 · 多走 ${esc(topM)}（${esc(topP)}）${fbPart}</p>`;
+}
+
 function renderRoutes(){
   const box = $("#routesBox");
   const entries = Object.entries(state.routes || {});
-  if (!entries.length){ box.innerHTML = `<div class="empty">暂无路由</div>`; return; }
+  if (!entries.length){ box.innerHTML = `<div class="empty">暂无路由</div>`; paintRoutesLockUI(); return; }
+  const pickerModels = availableModelsForPicker();
   box.innerHTML = entries.map(([id, meta]) => {
     const m = meta || {};
-    const candidates = Array.isArray(m.candidates) ? m.candidates.join(", ") : "";
+    const candidates = Array.isArray(m.candidates) ? m.candidates : [];
+    const candText = candidates.join(", ");
+    const fb = routeFallbackOf(id, m);
+    const tag = fb === "none" ? "仅大杯" : "可兜底";
+    const protectedRoute = ["日常","复杂","Agent","快速","代码","小说"].includes(id);
+    const candChips = candidates.map(c => {
+      const cup = cupLabelOf(c);
+      const warn = (fb === "none" && cup === "free") ? " style=\"outline:1px solid var(--warn)\"" : "";
+      return `<span class="chip" title="${esc(c)}"${warn}>${esc(c)} · ${cupChipText(cup)}</span>`;
+    }).join(" ") || `<span class="desc">尚未填写候选</span>`;
+    const pick = pickerModels.slice(0, 24).map(name => {
+      const cup = cupLabelOf(name);
+      const on = candidates.some(c => String(c).toLowerCase() === name.toLowerCase());
+      return `<button type="button" class="btn btn-ghost btn-sm" data-add-cand="${esc(name)}" style="margin:2px;${on ? "opacity:.45" : ""}">${esc(name)} <small>${cupChipText(cup)}</small></button>`;
+    }).join("");
+    const toVal = m.request_timeout_sec != null ? m.request_timeout_sec : "";
+    const stallVal = m.stream_stall_sec != null ? m.stream_stall_sec : "";
+    const retryVal = m.max_retries != null ? m.max_retries : "";
     return `<div class="route" data-rid="${esc(id)}">
-      <div class="name"><strong>${esc(id)}</strong><button class="btn btn-ghost btn-sm" type="button" data-del-route="${esc(id)}">删除</button></div>
+      <div class="name"><strong>${esc(id)}</strong><span class="chip">${tag}</span><button class="btn btn-ghost btn-sm" type="button" data-del-route="${esc(id)}">删除</button></div>
       <div class="field" style="margin-top:10px"><label>说明</label><input data-rf="description" value="${esc(m.description || "")}" /></div>
-      <div class="field"><label>候选模型（逗号分隔，按优先级）</label><input data-rf="candidates" value="${esc(candidates)}" /></div>
+      <div class="field"><label>候选模型（逗号分隔，按优先级）</label><input data-rf="candidates" value="${esc(candText)}" /></div>
+      <div style="display:flex;flex-wrap:wrap;gap:6px;margin:6px 0">${candChips}</div>
+      <label class="inline" style="gap:8px;margin-top:6px"><input type="checkbox" data-rf="fallback" ${fb === "free_pool" ? "checked" : ""} /> 失败后允许免费小杯兜底</label>
+      <div class="field" style="margin-top:8px"><label>点选添加候选（大杯 / 中杯 / 小杯）</label>
+        <div style="display:flex;flex-wrap:wrap;gap:2px;max-height:88px;overflow:auto">${pick || `<span class="desc">先在上游渠道配置模型</span>`}</div>
+      </div>
+      <div class="inline" style="gap:10px;flex-wrap:wrap;margin-top:8px">
+        <div class="field" style="min-width:110px;flex:1"><label>超时秒（可选）</label><input data-rf="request_timeout_sec" type="number" min="3" max="600" step="1" placeholder="默认" value="${esc(toVal)}" /></div>
+        <div class="field" style="min-width:110px;flex:1"><label>卡顿切换秒</label><input data-rf="stream_stall_sec" type="number" min="1" max="120" step="1" placeholder="默认" value="${esc(stallVal)}" /></div>
+        <div class="field" style="min-width:110px;flex:1"><label>最大重试</label><input data-rf="max_retries" type="number" min="1" max="12" step="1" placeholder="默认" value="${esc(retryVal)}" /></div>
+      </div>
+      ${formatRouteStatsLine(id)}
+      ${protectedRoute ? `<p class="desc" style="margin-top:6px">内置路由建议改候选，勿删整张卡片（客户端仍会请求此名称）。</p>` : ""}
     </div>`;
   }).join("");
   box.querySelectorAll("[data-del-route]").forEach(btn => {
-    btn.onclick = () => { delete state.routes[btn.dataset.delRoute]; renderRoutes(); };
+    btn.onclick = () => {
+      const rid = btn.dataset.delRoute;
+      if (["日常","复杂","Agent"].includes(rid)) {
+        if (!confirm(`确定删除「${rid}」？客户端若仍选择该模型将无候选可用。建议只改候选名单。`)) return;
+      }
+      collectRoutesFromDom();
+      delete state.routes[rid];
+      markRoutesDirty();
+      renderRoutes();
+    };
   });
+  box.querySelectorAll("[data-add-cand]").forEach(btn => {
+    btn.onclick = () => {
+      const card = btn.closest(".route");
+      if (!card) return;
+      const inp = card.querySelector('[data-rf="candidates"]');
+      if (!inp) return;
+      const name = btn.dataset.addCand;
+      const cur = inp.value.split(",").map(s => s.trim()).filter(Boolean);
+      if (!cur.some(c => c.toLowerCase() === name.toLowerCase())) cur.push(name);
+      inp.value = cur.join(", ");
+      markRoutesDirty();
+      collectRoutesFromDom();
+      renderRoutes();
+    };
+  });
+  box.querySelectorAll("input").forEach(inp => {
+    inp.addEventListener("input", markRoutesDirty);
+    inp.addEventListener("change", markRoutesDirty);
+  });
+  paintRoutesLockUI();
 }
 
 function collectRoutesFromDom(){
   const next = {};
   $$("#routesBox .route").forEach(card => {
     const id = card.dataset.rid;
-    next[id] = {
+    const fbEl = card.querySelector('[data-rf="fallback"]');
+    const item = {
       description: card.querySelector('[data-rf="description"]').value.trim(),
       candidates: card.querySelector('[data-rf="candidates"]').value.split(",").map(s => s.trim()).filter(Boolean),
+      fallback: fbEl && fbEl.checked ? "free_pool" : "none",
     };
+    const to = card.querySelector('[data-rf="request_timeout_sec"]');
+    const stall = card.querySelector('[data-rf="stream_stall_sec"]');
+    const retry = card.querySelector('[data-rf="max_retries"]');
+    if (to && to.value.trim()) item.request_timeout_sec = Number(to.value);
+    if (stall && stall.value.trim()) item.stream_stall_sec = Number(stall.value);
+    if (retry && retry.value.trim()) item.max_retries = Number(retry.value);
+    next[id] = item;
   });
   state.routes = next;
   return next;
@@ -1259,11 +1421,17 @@ async function refresh(){
     if (!r.ok) throw new Error("overview");
     const j = await r.json();
     state.overview = j;
-    state.routes = j.routes || {};
+    state.routesManualLock = !!(j.config && j.config.routes_manual_lock);
+    state.cupLabels = j.cup_labels || {};
+    state.routeStats = j.route_stats || {};
+    if (!state.dirtyRoutes) {
+      state.routes = j.routes || {};
+    }
     if (j.license && typeof window.paintLicense === "function") window.paintLicense(j.license);
     renderHome(j);
     renderMonitor(j);
-    renderRoutes();
+    if (!state.dirtyRoutes) renderRoutes();
+    else paintRoutesLockUI();
     if (!state.dirtyProviders && results[1] && results[1].ok){
       state.providers = (await results[1].json() || []).map(normalizeProvider);
       if (!sessionStorage.getItem("dashuai_presets_ensured")) {
@@ -1489,25 +1657,106 @@ $("#btnSaveProviders2").onclick = saveProv;
 
 $("#btnAddRoute").onclick = () => {
   collectRoutesFromDom();
-  let i = 1, id = `route-${i}`;
-  while (state.routes[id]) { i += 1; id = `route-${i}`; }
-  state.routes[id] = { description: "新路由", candidates: [] };
+  let i = 1, id = `自定义-${i}`;
+  while (state.routes[id]) { i += 1; id = `自定义-${i}`; }
+  state.routes[id] = { description: "自定义路由：自行填写候选", candidates: [], fallback: "free_pool" };
+  markRoutesDirty();
   renderRoutes();
 };
+async function saveRoutesNow(){
+  const body = collectRoutesFromDom();
+  const r = await fetch("/api/routers", { method: "PUT", headers: authHeaders(), body: JSON.stringify(body) });
+  if (!r.ok) throw new Error(await r.text());
+  state.dirtyRoutes = false;
+  state.routesManualLock = true;
+  paintRoutesLockUI();
+  toast("路由已保存并锁定，不会被自动优选覆盖");
+  await refresh();
+}
 $("#btnSaveRoutes").onclick = async () => {
-  try{
-    const body = collectRoutesFromDom();
-    const r = await fetch("/api/routers", { method: "PUT", headers: authHeaders(), body: JSON.stringify(body) });
+  try{ await saveRoutesNow(); }
+  catch{ toast("保存路由失败：检查本地 API Key", true); }
+};
+if ($("#btnSaveRoutesDirty")) $("#btnSaveRoutesDirty").onclick = () => $("#btnSaveRoutes").click();
+
+async function exportRoutesPack(){
+  try {
+    if (state.dirtyRoutes) await saveRoutesNow();
+    const r = await fetch("/api/routers/export", { headers: authHeaders() });
     if (!r.ok) throw new Error(await r.text());
-    toast("路由已保存");
-    refresh();
-  }catch{
-    toast("保存路由失败：检查本地 API Key", true);
+    const j = await r.json();
+    const blob = new Blob([JSON.stringify(j, null, 2)], { type: "application/json" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `dashuai-routes-${new Date().toISOString().slice(0,10)}.json`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+    toast("路由配置已导出");
+  } catch (e) {
+    toast("导出失败：" + (e.message || "未知错误"), true);
+  }
+}
+async function importRoutesPack(file, mode){
+  const text = await file.text();
+  let data;
+  try { data = JSON.parse(text); }
+  catch { throw new Error("不是合法 JSON"); }
+  const body = (data && data.format === "dashuai-routes")
+    ? { mode, routes: data.routes || {} }
+    : { mode, routes: data.routes || data };
+  const r = await fetch("/api/routers/import", {
+    method: "POST",
+    headers: authHeaders(),
+    body: JSON.stringify(body),
+  });
+  if (!r.ok) throw new Error(await r.text());
+  const j = await r.json();
+  state.dirtyRoutes = false;
+  state.routesManualLock = true;
+  state.routes = {};
+  await refresh();
+  toast(`已${mode === "replace" ? "替换" : "合并"}导入 ${j.count || 0} 条路由并锁定`);
+}
+if ($("#btnExportRoutes")) $("#btnExportRoutes").onclick = () => exportRoutesPack();
+if ($("#btnImportRoutes")) $("#btnImportRoutes").onclick = () => {
+  const f = $("#routesImportFile");
+  if (f) f.click();
+};
+if ($("#routesImportFile")) $("#routesImportFile").onchange = async (ev) => {
+  const file = ev.target.files && ev.target.files[0];
+  ev.target.value = "";
+  if (!file) return;
+  const merge = confirm("导入方式：\n确定 = 合并到现有路由（推荐）\n取消 = 整表替换现有路由");
+  const mode = merge ? "merge" : "replace";
+  if (mode === "replace" && !confirm("确认整表替换？建议先点「导出」备份。")) return;
+  try { await importRoutesPack(file, mode); }
+  catch (e) { toast("导入失败：" + (e.message || "未知错误"), true); }
+};
+if ($("#routesLockToggle")) $("#routesLockToggle").onchange = async () => {
+  try {
+    const curResp = await fetch("/api/config", { headers: authHeaders() });
+    if (!curResp.ok) throw new Error("config");
+    const cur = await curResp.json();
+    cur.routes_manual_lock = !!$("#routesLockToggle").checked;
+    const r = await fetch("/api/config", { method: "PUT", headers: authHeaders(), body: JSON.stringify(cur) });
+    if (!r.ok) throw new Error("save");
+    state.routesManualLock = !!cur.routes_manual_lock;
+    paintRoutesLockUI();
+    toast(cur.routes_manual_lock ? "已锁定手动路由" : "已解锁（健康探测等可自动重建）");
+  } catch (_) {
+    toast("切换锁定失败", true);
+    paintRoutesLockUI();
   }
 };
 if ($("#btnRebuildSmartRoutes")) $("#btnRebuildSmartRoutes").onclick = async () => {
   try {
+    if (state.routesManualLock || state.dirtyRoutes) {
+      if (!confirm("将按日志覆盖当前路由候选（自定义路由会保留）。确定继续？")) return;
+    }
     await rebuildSmartRoutes(true);
+    state.dirtyRoutes = false;
+    state.routesManualLock = true;
+    paintRoutesLockUI();
     await refresh();
   } catch (e) {
     toast("按日志优选失败：" + (e.message || "未知错误"), true);
@@ -1593,6 +1842,27 @@ document.addEventListener("visibilitychange", () => {
 
 
 /* === CHANNEL_PRESET_PICKER === */
+// 邀请注册送额度（NewAPI 类中转）：展示在「注册送积分」面板；可一键添加为上游渠道
+const SIGNUP_BONUS_OFFERS = [
+  {id:"AgentRouter", name:"AgentRouter", bonus:"注册送 175 刀", signup:"https://agentrouter.org/register?aff=rBUP", base_url:"https://agentrouter.org/v1", note:"OpenAI 兼容中转 · 注册赠额", region:"vpn", weight:12},
+  {id:"DoCode", name:"DoCode", bonus:"注册送 100 刀", signup:"https://docode.cc/register?aff=FIAa", base_url:"https://docode.cc/v1", note:"OpenAI 兼容中转 · 注册赠额", region:"vpn", weight:11},
+  {id:"SeekAI", name:"SeekAI", bonus:"注册送 200 刀", signup:"https://seekai.cc/sign-up?aff=zrQR", base_url:"https://seekai.cc/v1", note:"OpenAI 兼容中转 · 注册赠额", region:"vpn", weight:13},
+  {id:"GoRouter", name:"GoRouter", bonus:"注册送 70 刀", signup:"https://gorouter.app/sign-up?aff=Gth2", base_url:"https://gorouter.app/v1", note:"OpenAI 兼容中转 · 注册赠额", region:"vpn", weight:10},
+  {id:"API456", name:"API456", bonus:"注册送 50 算力", signup:"https://gpt.api456.me/?aff=wkan", base_url:"https://gpt.api456.me/v1", note:"OpenAI 兼容中转 · 注册赠算力", region:"vpn", weight:9},
+  {id:"Sulmate", name:"Sulmate", bonus:"注册送 50 刀", signup:"https://free.sulmate.cn/sign-up?aff=nbEk", base_url:"https://free.sulmate.cn/v1", note:"OpenAI 兼容中转 · 注册赠额", region:"vpn", weight:9},
+  {id:"TokenRhythm", name:"TokenRhythm", bonus:"注册送 68 人民币额度", signup:"https://tokenrhythm.studio/i/rf_tr_9eL1DqeYSn3YEsi1UGBN0pQ3", base_url:"https://tokenrhythm.studio/v1", note:"OpenAI 兼容中转 · 人民币额度", region:"vpn", weight:10},
+  {id:"TabiToken", name:"TabiToken", bonus:"注册送 120 刀", signup:"https://tabitoken.com/sign-up?aff=4X2X", base_url:"https://tabitoken.com/v1", note:"OpenAI 兼容中转 · 注册赠额", region:"vpn", weight:11},
+  {id:"Beizhi", name:"Beizhi", bonus:"注册送 50", signup:"https://beizhi.sylu.cc/sign-up?aff=hDMa", base_url:"https://beizhi.sylu.cc/v1", note:"OpenAI 兼容中转 · 注册赠额", region:"vpn", weight:9},
+  {id:"Kscsnkli", name:"Kscsnkli AI", bonus:"注册送 2200 刀", signup:"https://ai.kscsnkli.site/sign-up?aff=RgxF", base_url:"https://ai.kscsnkli.site/v1", note:"OpenAI 兼容中转 · 高额注册赠额（以站点为准）", region:"vpn", weight:14},
+  {id:"TrueSota", name:"TrueSota", bonus:"注册送 20 刀", signup:"https://true-sota.com/register?aff=SD53WPQ5MV22", base_url:"https://true-sota.com/v1", note:"OpenAI 兼容中转 · 注册赠额", region:"vpn", weight:8},
+  {id:"JustWoker", name:"JustWoker", bonus:"注册送 90 刀", signup:"https://api.justwoker.icu/sign-up?aff=2Hqv", base_url:"https://api.justwoker.icu/v1", note:"OpenAI 兼容中转 · 注册赠额", region:"vpn", weight:10},
+  {id:"GemAI", name:"GemAI", bonus:"注册送 200 刀", signup:"https://api.gemai.cc/sign-up?aff=Tg34fouO", base_url:"https://api.gemai.cc/v1", note:"OpenAI 兼容中转 · 注册赠额", region:"vpn", weight:13},
+  {id:"Mcjdai", name:"Mcjdai", bonus:"注册送 60 刀", signup:"https://www.mcjdai.com/register?referral_code=inv_RMUTDCWT", base_url:"https://www.mcjdai.com/v1", note:"OpenAI 兼容中转 · 注册赠额", region:"vpn", weight:10},
+  {id:"MeAPI", name:"MeAPI", bonus:"0.02 倍率", signup:"https://meapi.space/register?aff=XQTFYCSNX5QF", base_url:"https://meapi.space/v1", note:"OpenAI 兼容中转 · 低倍率计费", region:"vpn", weight:11},
+  {id:"Wlaicc", name:"Wlaicc", bonus:"0.025 倍率", signup:"https://wlaicc.cc/register?aff=JHRPRDZ7L89S", base_url:"https://wlaicc.cc/v1", note:"OpenAI 兼容中转 · 低倍率计费", region:"vpn", weight:11},
+  {id:"AnyRouter", name:"AnyRouter", bonus:"免费（较慢）", signup:"https://anyrouter.top/register?aff=iIUt", base_url:"https://anyrouter.top/v1", note:"免费池 · 速度一般，适合兜底", region:"vpn", weight:4},
+];
+
 const CHANNEL_PRESETS = [
   // 顺序：日额度/赠送优先，免费池靠后（与 providers.example.json 对齐）
   {id:"ModelScope", name:"ModelScope", region:"cn", note:"魔搭：国内直连日额度，含大杯+识图 VL", signup:"https://modelscope.cn/my/myaccesstoken", base_url:"https://api-inference.modelscope.cn/v1", models:["Qwen/Qwen3.5-397B-A17B", "Qwen/Qwen3-235B-A22B-Instruct-2507", "deepseek-ai/DeepSeek-V4-Pro", "deepseek-ai/DeepSeek-V4-Flash-0731", "Qwen/Qwen3.5-122B-A10B", "Qwen/Qwen3.5-27B", "Qwen/Qwen3-Coder-30B-A3B-Instruct", "Qwen/Qwen3-VL-235B-A22B-Instruct", "Qwen/Qwen3-VL-8B-Instruct", "Qwen/Qwen3-8B"], free_only:true, quota_tier:"daily", weight:12, defaultOn:true},
@@ -1615,14 +1885,16 @@ const CHANNEL_PRESETS = [
 ];
 
 async function rebuildSmartRoutes(showToast=true){
-  const r = await fetch("/api/routers/rebuild-smart", { method: "POST", headers: authHeaders() });
+  const r = await fetch("/api/routers/rebuild-smart?force=1", { method: "POST", headers: authHeaders() });
   const j = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(j.detail || j.message || "rebuild failed");
   state.routes = j.routes || {};
+  state.routesManualLock = true;
+  state.dirtyRoutes = false;
   if (typeof renderRoutes === "function") renderRoutes();
   if (showToast) {
     const n = (j.summary || []).length;
-    toast("已按日志重建 " + n + " 类路由（日额度/强模型优先，免费小杯兜底）");
+    toast("已按日志重建 " + n + " 类路由（日常可兜底 / 复杂仅大杯），并已重新锁定");
   }
   return j;
 }
@@ -1803,27 +2075,93 @@ async function ensureAllPresetsPresent(opts){
   return { added, updated };
 }
 
+function bonusOfferToPreset(offer){
+  return {
+    name: offer.name,
+    base_url: offer.base_url,
+    free_only: true,
+    quota_tier: offer.id === "AnyRouter" ? "free" : "signup",
+    weight: offer.weight ?? 8,
+    models: ["gpt-4o-mini", "gpt-4o", "deepseek-chat", "claude-3-5-sonnet-20241022"],
+  };
+}
+
+function upsertBonusOfferChannel(list, offer){
+  return upsertPresetChannel(list, bonusOfferToPreset(offer));
+}
+
 function renderFreeSignupList(){
   const box = $("#freeSignupList");
   if (!box) return;
-  box.innerHTML = CHANNEL_PRESETS.map(p => {
-    const vpn = p.region === "vpn";
-    const tag = vpn ? '<span class="tag-vpn">需 VPN</span>' : '<span class="tag-cn">国内</span>';
-    return `<div class="preset-card on" data-signup="${esc(p.id)}">
+  const offers = (typeof SIGNUP_BONUS_OFFERS !== "undefined" && SIGNUP_BONUS_OFFERS.length)
+    ? SIGNUP_BONUS_OFFERS
+    : [];
+  if (!offers.length) {
+    box.innerHTML = `<p class="desc">暂无注册送额度链接。</p>`;
+    return;
+  }
+  box.innerHTML = offers.map(p => {
+    const vpn = p.region !== "cn";
+    const tag = vpn ? '<span class="tag-vpn">需外网</span>' : '<span class="tag-cn">国内</span>';
+    const bonus = p.bonus ? `<span class="tag-cn" style="background:rgba(62,207,142,.15);color:#3ecf8e">${esc(p.bonus)}</span>` : "";
+    return `<div class="preset-card on" data-bonus="${esc(p.id)}">
       <div class="row"><div>
-        <div class="title">${esc(p.name)} ${tag}</div>
-        <div class="note">${esc(p.note)}</div>
+        <div class="title">${esc(p.name)} ${bonus} ${tag}</div>
+        <div class="note">${esc(p.note || "")}</div>
       </div></div>
       <div class="url">${esc(p.signup)}</div>
       <div class="acts">
         <a class="btn btn-secondary btn-sm" href="${esc(p.signup)}" target="_blank" rel="noreferrer">去注册</a>
         <button class="btn btn-ghost btn-sm" type="button" data-copy-url="${esc(p.signup)}">复制链接</button>
+        <button class="btn btn-ghost btn-sm" type="button" data-add-bonus="${esc(p.id)}">添加为渠道</button>
       </div>
     </div>`;
   }).join("");
   box.querySelectorAll("[data-copy-url]").forEach(b => {
     b.onclick = (e) => { e.preventDefault(); e.stopPropagation(); copyText(b.dataset.copyUrl); };
   });
+  box.querySelectorAll("[data-add-bonus]").forEach(b => {
+    b.onclick = async (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const offer = SIGNUP_BONUS_OFFERS.find(x => x.id === b.dataset.addBonus);
+      if (!offer) return;
+      const list = (state.providers || []).map(normalizeProvider);
+      const r = upsertBonusOfferChannel(list, offer);
+      state.providers = list;
+      state.dirtyProviders = true;
+      try {
+        await saveProviders(false);
+        state.dirtyProviders = false;
+        toast((r === "added" ? "已添加渠道：" : "已更新渠道：") + offer.name + "（请粘贴 Key 后启用）");
+      } catch (_) {
+        toast("已写入列表，请点「保存全部」", true);
+      }
+      if (typeof renderProviders === "function") renderProviders();
+    };
+  });
+}
+
+async function addAllBonusChannels(){
+  const offers = SIGNUP_BONUS_OFFERS || [];
+  if (!offers.length){ toast("没有可添加的注册送额度渠道", true); return; }
+  const list = (state.providers || []).map(normalizeProvider);
+  let added = 0, updated = 0;
+  for (const offer of offers){
+    const r = upsertBonusOfferChannel(list, offer);
+    if (r === "added") added += 1; else updated += 1;
+  }
+  state.providers = list;
+  state.dirtyProviders = true;
+  try {
+    await saveProviders(false);
+    state.dirtyProviders = false;
+    toast(`已处理 ${offers.length} 个渠道（新增 ${added} / 更新 ${updated}），请粘贴 Key 后启用`);
+  } catch (_) {
+    toast("已写入列表，请点「保存全部」", true);
+  }
+  if (typeof renderProviders === "function") renderProviders();
+  go("providers");
 }
 
 async function applyPresetIds(ids, goProviders){
@@ -1875,6 +2213,7 @@ function bootPresetPicker(){
   renderPresetGrid("#presetGrid2", "#presetGrid");
   renderFreeSignupList();
   const bind = (id, fn) => { const el = document.getElementById(id); if (el) el.onclick = fn; };
+  bind("btnAddAllBonusChannels", () => { addAllBonusChannels().catch(e => toast(String(e.message||e), true)); });
   bind("btnPresetCn", () => setPresetFilter("cn"));
   bind("btnPresetVpn", () => setPresetFilter("vpn"));
   bind("btnPresetAll", () => setPresetFilter("all"));

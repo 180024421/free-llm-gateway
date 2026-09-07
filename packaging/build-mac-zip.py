@@ -432,6 +432,8 @@ def main() -> int:
                         break
         except Exception as exc:
             _log(f"asset discover failed: {exc}")
+            _log(f"falling back to {FALLBACK_TAG} / {FALLBACK_VER}")
+            tag, ver = FALLBACK_TAG, FALLBACK_VER
 
     for arch in arches:
         build_one(arch, tag, ver)

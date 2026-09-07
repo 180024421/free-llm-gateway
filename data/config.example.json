@@ -105,7 +105,9 @@
 
   "expose_upstream_model": true,
 
-  "auto_sync_workbuddy": true
+  "auto_sync_workbuddy": true,
+
+  "routes_manual_lock": false
 
 }
 

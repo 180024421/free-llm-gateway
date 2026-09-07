@@ -175,6 +175,30 @@ def overview_payload(base_url: str) -> dict[str, Any]:
             last = dict(STATE.last_chat) if STATE.last_chat else None
     except Exception:
         last = None
+    cup_labels: dict[str, str] = {}
+    try:
+        from .route_builder import _is_free_fallback_model, model_accuracy_tier
+
+        for p in providers:
+            for m in p.get("models") or []:
+                name = str(m or "").strip()
+                if not name or name in cup_labels:
+                    continue
+                if _is_free_fallback_model(name):
+                    cup_labels[name] = "free"
+                elif model_accuracy_tier(name) >= 0.75:
+                    cup_labels[name] = "big"
+                else:
+                    cup_labels[name] = "mid"
+    except Exception:
+        cup_labels = {}
+    route_stats: dict[str, Any] = {}
+    try:
+        from .proxy import route_hit_stats
+
+        route_stats = (route_hit_stats(1) or {}).get("routes") or {}
+    except Exception:
+        route_stats = {}
     return {
         "ok": True,
         "ts": time.time(),
@@ -199,8 +223,12 @@ def overview_payload(base_url: str) -> dict[str, Any]:
             "cn_only": bool(cfg.get("cn_only", False)),
             "expose_upstream_model": bool(cfg.get("expose_upstream_model", True)),
             "auto_sync_workbuddy": bool(cfg.get("auto_sync_workbuddy", True)),
+            "routes_manual_lock": bool(cfg.get("routes_manual_lock", False)),
         },
         "last_chat": last,
+        "fallback_hits": int(getattr(STATE, "fallback_hits", 0) or 0),
+        "cup_labels": cup_labels,
+        "route_stats": route_stats,
         "providers": [
             {
                 "name": p.get("name"),

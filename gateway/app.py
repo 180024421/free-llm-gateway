@@ -28,7 +28,7 @@ from .config import (
     save_routers,
 )
 from .poller import check_all, get_poll_status, latest_health, load_latest_history
-from .route_builder import rebuild_and_save
+from .route_builder import maybe_rebuild_and_save, rebuild_and_save
 from .proxy import (
     aclose_http_client,
     call_log,
@@ -42,6 +42,7 @@ from .proxy import (
     prepare_body_for_upstream,
     probe_provider,
     remount_route_for_tools,
+    route_hit_stats,
     usage_csv,
     usage_for_ui,
     usage_summary,
@@ -175,7 +176,7 @@ async def lifespan(_: FastAPI):
             except Exception:
                 pass
             try:
-                rebuild_and_save()
+                maybe_rebuild_and_save()
             except Exception:
                 pass
 
@@ -645,6 +646,7 @@ async def put_config(request: Request, _: None = Depends(_auth)) -> dict[str, An
         "cn_only",
         "expose_upstream_model",
         "auto_sync_workbuddy",
+        "routes_manual_lock",
     ):
         if key in body:
             val = body[key]
@@ -662,6 +664,7 @@ async def put_config(request: Request, _: None = Depends(_auth)) -> dict[str, An
                 "bill_estimated_usage",
                 "license_allow_insecure_http",
                 "novel_fallback_daily",
+                "routes_manual_lock",
             }:
                 if isinstance(val, str):
                     val = val.strip().lower() in {"1", "true", "yes", "on"}
@@ -713,7 +716,7 @@ async def put_providers(request: Request, _: None = Depends(_auth)) -> dict[str,
         )
     save_providers(cleaned)
     try:
-        rebuild_and_save()
+        maybe_rebuild_and_save()
     except Exception:
         pass
     synced = None
@@ -726,7 +729,7 @@ async def put_providers(request: Request, _: None = Depends(_auth)) -> dict[str,
     return {
         "status": "saved",
         "count": len(cleaned),
-        "routes_rebuilt": True,
+        "routes_rebuilt": not bool(load_config().get("routes_manual_lock")),
         "workbuddy_sync": synced,
     }
 
@@ -741,14 +744,113 @@ async def put_routers(request: Request, _: None = Depends(_auth)) -> dict[str, A
     body = await request.json()
     if not isinstance(body, dict):
         raise HTTPException(status_code=400, detail="JSON object required")
-    save_routers(body)
-    return {"status": "saved", "routes": list(body.keys())}
+    from .router import normalize_route_fallback, normalize_route_timing
+
+    cleaned: dict[str, Any] = {}
+    for rid, meta in body.items():
+        if isinstance(meta, list):
+            meta = {"candidates": meta, "description": "", "fallback": normalize_route_fallback(str(rid))}
+        if not isinstance(meta, dict):
+            continue
+        item = dict(meta)
+        item["fallback"] = normalize_route_fallback(str(rid), item)
+        cands = item.get("candidates") or []
+        if not isinstance(cands, list):
+            cands = []
+        item["candidates"] = [str(x).strip() for x in cands if str(x).strip()]
+        for k in ("request_timeout_sec", "stream_stall_sec", "max_retries"):
+            item.pop(k, None)
+        item.update(normalize_route_timing(meta))
+        desc = item.get("description")
+        item["description"] = str(desc).strip() if desc is not None else ""
+        cleaned[str(rid)] = item
+    save_routers(cleaned)
+    cfg = load_config()
+    cfg["routes_manual_lock"] = True
+    save_config(cfg)
+    return {"status": "saved", "routes": list(cleaned.keys()), "routes_manual_lock": True}
+
+
+@app.get("/api/routers/stats")
+def get_routers_stats(days: int = 1, _: None = Depends(_auth)) -> dict[str, Any]:
+    """Per-route hit / fallback summary for the routes panel."""
+    return route_hit_stats(max(1, min(int(days or 1), 30)))
+
+
+@app.get("/api/routers/export")
+def export_routers(_: None = Depends(_auth)) -> dict[str, Any]:
+    """Downloadable route pack (no secrets)."""
+    return {
+        "format": "dashuai-routes",
+        "version": 1,
+        "exported_at": time.time(),
+        "routes": load_routers(),
+    }
+
+
+@app.post("/api/routers/import")
+async def import_routers(request: Request, _: None = Depends(_auth)) -> dict[str, Any]:
+    """Merge or replace routes from an exported pack / raw routers object."""
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="JSON object required")
+    mode = str(body.get("mode") or "merge").strip().lower()
+    raw: Any = body.get("routes") if isinstance(body.get("routes"), dict) else body
+    if isinstance(raw, dict) and str(raw.get("format") or "") == "dashuai-routes" and isinstance(raw.get("routes"), dict):
+        raw = raw["routes"]
+    if not isinstance(raw, dict):
+        raise HTTPException(status_code=400, detail="routes object required")
+    from .router import normalize_route_fallback, normalize_route_timing
+
+    incoming: dict[str, Any] = {}
+    for rid, meta in raw.items():
+        if rid in {"format", "version", "exported_at", "mode", "routes"}:
+            continue
+        if isinstance(meta, list):
+            meta = {"candidates": meta, "description": "", "fallback": normalize_route_fallback(str(rid))}
+        if not isinstance(meta, dict):
+            continue
+        item = {
+            "description": str(meta.get("description") or "").strip(),
+            "candidates": [str(x).strip() for x in (meta.get("candidates") or []) if str(x).strip()],
+            "fallback": normalize_route_fallback(str(rid), meta),
+        }
+        item.update(normalize_route_timing(meta))
+        incoming[str(rid)] = item
+    if not incoming:
+        raise HTTPException(status_code=400, detail="没有可导入的路由")
+    if mode == "replace":
+        merged = incoming
+    else:
+        merged = dict(load_routers())
+        merged.update(incoming)
+    save_routers(merged)
+    cfg = load_config()
+    cfg["routes_manual_lock"] = True
+    save_config(cfg)
+    return {
+        "status": "imported",
+        "mode": "replace" if mode == "replace" else "merge",
+        "count": len(incoming),
+        "routes": list(merged.keys()),
+        "routes_manual_lock": True,
+    }
 
 
 @app.post("/api/routers/rebuild-smart")
-def post_rebuild_smart_routers(_: None = Depends(_auth)) -> dict[str, Any]:
+def post_rebuild_smart_routers(request: Request, _: None = Depends(_auth)) -> dict[str, Any]:
     """Rebuild all use-case routes from usage.jsonl success rates (top 10 each)."""
-    return rebuild_and_save()
+    force = False
+    try:
+        force = str(request.query_params.get("force") or "").strip().lower() in {"1", "true", "yes"}
+    except Exception:
+        force = False
+    if bool(load_config().get("routes_manual_lock")) and not force:
+        raise HTTPException(
+            status_code=409,
+            detail="路由已手动锁定。确认覆盖请带 force=1，或先关闭「锁定手动路由」。",
+        )
+    return maybe_rebuild_and_save(force=True)
 
 
 @app.get("/api/integrations/workbuddy")
@@ -785,7 +887,7 @@ async def post_workbuddy_integration(
                 save_config(cfg)
                 api_key_updated = True
     try:
-        rebuild_and_save()
+        maybe_rebuild_and_save()
     except Exception:
         pass
     out = sync_workbuddy()
@@ -938,7 +1040,32 @@ async def _chat_completions_inner(request: Request):
             stall_sec = max(stall_sec, float(cfg.get("tool_stream_stall_sec") or 20))
             timeout = max(timeout, min(float(cfg.get("tool_request_timeout_sec") or 120), 120.0))
 
-    candidates = resolve_candidates(client_model, providers, routers)
+    # Per-route overrides (自定义 / 保存路由时可选填写)
+    from .router import _lookup_route, effective_fallback_policy
+
+    route_meta = _lookup_route(client_model, routers)
+    if isinstance(route_meta, dict):
+        if route_meta.get("request_timeout_sec") not in (None, "", 0, "0"):
+            try:
+                timeout = float(route_meta["request_timeout_sec"])
+            except Exception:
+                pass
+        if route_meta.get("stream_stall_sec") not in (None, "", 0, "0"):
+            try:
+                stall_sec = float(route_meta["stream_stall_sec"])
+            except Exception:
+                pass
+        if route_meta.get("max_retries") not in (None, "", 0, "0"):
+            try:
+                max_retries = int(route_meta["max_retries"])
+            except Exception:
+                pass
+
+    fb_hdr = (request.headers.get("x-gateway-fallback-policy") or "").strip().lower()
+    fb_override = fb_hdr if fb_hdr in {"none", "free_pool"} else None
+    candidates = resolve_candidates(
+        client_model, providers, routers, fallback_override=fb_override
+    )
     if not candidates:
         cn_only = bool(cfg.get("cn_only", False))
         ready_names = [
@@ -948,7 +1075,20 @@ async def _chat_completions_inner(request: Request):
             and str(p.get("api_key") or "").strip()
             and not str(p.get("api_key") or "").startswith("REPLACE_")
         ]
-        if cn_only:
+        from .meta import strip_route_display as _srd
+        from .router import _route_candidates as _rc
+
+        route_label = _srd(client_model or "")
+        eff_fb = effective_fallback_policy(client_model, routers, override=fb_override)
+        if ready_names and eff_fb == "none":
+            wanted = [str(m) for m in _rc(client_model, routers)][:6]
+            detail = (
+                f"「{route_label}」路由仅走大杯且已关闭小杯兜底，"
+                f"候选（{', '.join(wanted) or '无'}）当前全部不可用（冷却 / 额度 / 未启用）。"
+                "可暂时改选「日常」，或在面板「路由模型」为该路由勾选「失败后允许免费小杯兜底」，"
+                "也可到「上游渠道」检查对应 Key 余额与状态。"
+            )
+        elif cn_only:
             detail = (
                 "国内模式已开启，但没有可用的国内上游。"
                 "请粘贴魔搭(ms-)或硅基/千问等国内 Key；"
@@ -980,6 +1120,17 @@ async def _chat_completions_inner(request: Request):
         plimit = provider_limit_from_config(cfg)
 
         async def _do_attempt() -> Any | None:
+            from .meta import apply_alias
+            from .router import _route_candidates
+
+            wanted_lower = {
+                apply_alias(str(m)).lower()
+                for m in _route_candidates(client_model, routers)
+            }
+            up_l = apply_alias(str(upstream_model or "")).lower()
+            is_free_fallback = bool(wanted_lower) and up_l not in wanted_lower
+            if is_free_fallback:
+                STATE.mark_fallback(client_request_id)
             resp, stream_iter, meta = await forward_chat(
                 provider=provider,
                 upstream_model=upstream_model,
@@ -989,12 +1140,15 @@ async def _chat_completions_inner(request: Request):
                 stream=stream,
                 stall_sec=stall_sec,
                 client_request_id=client_request_id,
+                spillover=is_free_fallback,
             )
             gateway_headers = {
                 "X-Gateway-Provider": _ascii_header(meta.get("provider")),
                 "X-Gateway-Model": _ascii_header(meta.get("upstream_model")),
                 "X-Request-Id": _ascii_header(meta.get("request_id") or ""),
             }
+            if is_free_fallback:
+                gateway_headers["X-Gateway-Fallback"] = "free-pool"
             if stream:
                 if stream_iter is not None:
                     try:
@@ -1068,7 +1222,7 @@ async def _chat_completions_inner(request: Request):
         try_n = min(len(candidates), max(max_retries, int(cfg.get("novel_max_retries") or 6)))
 
     use_hedge = (
-        snappy
+        is_fast_route(client_model)
         and bool(cfg.get("fast_hedged_requests", True))
         and (not has_tools or bool(cfg.get("fast_hedge_with_tools", False)))
         and len(candidates) >= 2
