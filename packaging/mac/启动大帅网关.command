@@ -53,6 +53,15 @@ DESKTOP_PY="$APP/packaging/run_desktop.py"
 LOG="$ROOT/data/desktop.log"
 PIDFILE="$ROOT/data/desktop.pid"
 
+port_alive() {
+  # 默认 8010；若 data/config.json 有 port 则读它（失败则仍用 8010）
+  P=8010
+  if [ -f "$ROOT/data/config.json" ]; then
+    P="$("$VENV/bin/python" -c "import json;print(json.load(open('$ROOT/data/config.json',encoding='utf-8-sig')).get('port') or 8010)" 2>/dev/null || echo 8010)"
+  fi
+  /usr/bin/curl -fsS --max-time 1 "http://127.0.0.1:${P}/api/overview" >/dev/null 2>&1
+}
+
 # 解除隔离属性（从浏览器下载后常见；失败忽略）
 /usr/bin/xattr -dr com.apple.quarantine "$ROOT" >/dev/null 2>&1 || true
 
@@ -145,58 +154,64 @@ if [ "${DASHUAI_FOREGROUND-}" = "1" ]; then
   exec "$VENV/bin/python" "$DESKTOP_PY"
 fi
 
-# 已在跑则提示，避免重复开多个
+# 已在跑：接口通 → 提示菜单栏；进程在但服务挂 → 清掉僵死进程后重开
 if [ -f "$PIDFILE" ]; then
   OLD_PID="$(cat "$PIDFILE" 2>/dev/null || true)"
   if [ -n "${OLD_PID-}" ] && kill -0 "$OLD_PID" 2>/dev/null; then
-    info "大帅网关似乎已在运行（PID $OLD_PID）。\n\n请看屏幕右上角菜单栏「大帅」→「显示窗口」。\n若没有，请先「退出网关」再重新启动。"
-    exit 0
+    if port_alive; then
+      info "大帅网关似乎已在运行（PID $OLD_PID）。\n\n请看屏幕右上角菜单栏「大帅」→「显示窗口」。\n若没有窗口，浏览器打开 http://127.0.0.1:8010/ui/\n真正退出请点菜单「退出网关」。"
+      exit 0
+    fi
+    echo "[大帅网关] 发现僵死进程 PID $OLD_PID（端口无响应），正在清理后重启…"
+    kill "$OLD_PID" 2>/dev/null || true
+    sleep 0.6
+    kill -9 "$OLD_PID" 2>/dev/null || true
+    rm -f "$PIDFILE"
   fi
 fi
 
 echo "[大帅网关] 正在后台启动独立窗口…"
 echo "[大帅网关] 日志：$LOG"
 
-# 用 osascript「do shell script」拉起进程，归属 launchd，不被 Terminal 关掉时带走
-# 注意：路径含中文时用单引号包起来；日志追加写入
-QS_ROOT="${ROOT//\'/\'\\\'\'}"
-QS_APP="${APP//\'/\'\\\'\'}"
-QS_PY="${VENV//\'/\'\\\'\'}/bin/python"
-QS_DESK="${DESKTOP_PY//\'/\'\\\'\'}"
-QS_LOG="${LOG//\'/\'\\\'\'}"
-QS_PID="${PIDFILE//\'/\'\\\'\'}"
+# 必须从当前 Terminal 会话 nohup 启动（继承 Aqua/GUI）。
+# 禁止经 AppleScript 间接拉 GUI：进程常能起来（有 PID），但 pywebview 窗口/菜单栏不出现。
+# disown 后关掉终端窗口一般不会带走子进程；若系统弹出「是否终止进程」请点「取消」。
+mkdir -p "$ROOT/data"
+: >>"$LOG"
+LOG_OFF="$(/usr/bin/wc -c <"$LOG" | /usr/bin/tr -d ' ')"
+echo "[大帅网关] ---- launch $(/bin/date '+%Y-%m-%d %H:%M:%S') ----" >>"$LOG"
 
-LAUNCH_CMD="export DASHUAI_DATA_DIR='${QS_ROOT}/data'; export DASHUAI_COMMERCIAL=1; export DASHUAI_BUNDLE_DIR='${QS_ROOT}'; export PYTHONPATH='${QS_APP}'; cd '${QS_APP}'; nohup '${QS_PY}' '${QS_DESK}' >>'${QS_LOG}' 2>&1 & echo \$! >'${QS_PID}'"
+nohup "$VENV/bin/python" "$DESKTOP_PY" >>"$LOG" 2>&1 &
+echo $! >"$PIDFILE"
+disown >/dev/null 2>&1 || true
 
-set +e
-/usr/bin/osascript >/dev/null 2>&1 <<APPLESCRIPT
-do shell script "$LAUNCH_CMD"
-APPLESCRIPT
-AS_RC=$?
-set -e
+new_log() {
+  # 只看本次启动之后追加的日志，避免历史「server ready」误判成功
+  /usr/bin/tail -c +"$((LOG_OFF + 1))" "$LOG" 2>/dev/null || true
+}
 
-if [ "$AS_RC" -ne 0 ]; then
-  # 回退：本机 nohup（部分环境禁用 osascript do shell script）
-  echo "[大帅网关] osascript 启动失败，改用本机后台启动…"
-  nohup "$VENV/bin/python" "$DESKTOP_PY" >>"$LOG" 2>&1 &
-  echo $! >"$PIDFILE"
-  disown >/dev/null 2>&1 || true
-fi
-
-# 等待进程起来；失败则弹窗展示日志尾部（方便排查）
+# 等待进程 + 服务就绪（不只看 PID）
 ok=0
+ready=0
 i=0
-while [ "$i" -lt 25 ]; do
+while [ "$i" -lt 45 ]; do
   i=$((i + 1))
   NEW_PID="$(cat "$PIDFILE" 2>/dev/null || true)"
   if [ -n "${NEW_PID-}" ] && kill -0 "$NEW_PID" 2>/dev/null; then
     ok=1
-    # 再等一会儿让窗口创建
-    sleep 1
-    break
+    if port_alive; then
+      ready=1
+      sleep 0.8
+      break
+    fi
+    # 日志级就绪（port 可能稍慢于 menubar）
+    if new_log | /usr/bin/grep -E -q "server ready on|mac menubar ready"; then
+      ready=1
+      sleep 0.8
+      break
+    fi
   fi
-  # 日志里若已有明确失败，提前跳出
-  if [ -f "$LOG" ] && /usr/bin/grep -E -q "Integrity fail|webview .*failed|uvicorn failed|wait_ready failed|Traceback" "$LOG" 2>/dev/null; then
+  if new_log | /usr/bin/grep -E -q "Integrity fail|webview .*failed|uvicorn failed|wait_ready failed|Traceback"; then
     break
   fi
   sleep 0.4
@@ -205,14 +220,26 @@ done
 if [ "$ok" -ne 1 ]; then
   TAIL=""
   if [ -f "$LOG" ]; then
-    TAIL="$(/usr/bin/tail -n 18 "$LOG" 2>/dev/null | /usr/bin/tr -d '\r' | /usr/bin/sed 's/\"//g')"
+    TAIL="$(new_log | /usr/bin/tail -n 18 | /usr/bin/tr -d '\r' | /usr/bin/sed 's/\"//g')"
   fi
   alert "独立窗口没有成功起来。\n\n请把下面日志发给客服，或用前台模式排查：\n/bin/bash -lc 'DASHUAI_FOREGROUND=1 \"${ROOT}/启动大帅网关.command\"'\n\n日志尾部：\n${TAIL:-(空)}"
   exit 1
 fi
 
-echo "[大帅网关] 已启动（PID $(cat "$PIDFILE" 2>/dev/null)）。"
-echo "[大帅网关] 主窗口应已弹出；若只见菜单栏，点右上角「大帅」→「显示窗口」。"
-echo "[大帅网关] 本终端可直接关掉（不要点「终止」去杀进程）。"
-# 不再用 AppleScript 强关 Terminal（会弹出「终止 bash/osascript？」误伤后台进程）
+UI_HINT="http://127.0.0.1:8010/ui/"
+if [ -f "$ROOT/data/config.json" ]; then
+  UI_HINT="$("$VENV/bin/python" -c "import json;p=json.load(open('$ROOT/data/config.json',encoding='utf-8-sig')).get('port') or 8010;print(f'http://127.0.0.1:{p}/ui/')" 2>/dev/null || echo "$UI_HINT")"
+fi
+
+if [ "$ready" -ne 1 ]; then
+  echo "[大帅网关] 进程已在跑，但窗口/服务尚未确认就绪。请看右上角菜单栏「大帅」，或打开："
+  echo "  $UI_HINT"
+  echo "[大帅网关] 仍无界面时请查看：$LOG"
+  echo "[大帅网关] 或前台模式：DASHUAI_FOREGROUND=1 /bin/bash \"$ROOT/启动大帅网关.command\""
+else
+  echo "[大帅网关] 已启动（PID $(cat "$PIDFILE" 2>/dev/null)）。"
+  echo "[大帅网关] 主窗口应已弹出；若只见菜单栏，点右上角「大帅」→「显示窗口」。"
+  echo "[大帅网关] 也可浏览器打开：$UI_HINT"
+fi
+echo "[大帅网关] 本终端可直接关掉（若弹出「终止进程」请点取消，不要点终止）。"
 exit 0

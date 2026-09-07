@@ -87,7 +87,10 @@ with zipfile.ZipFile(ZIP) as z:
     text = z.read(cmd_names[0]).decode("utf-8")
     assert "DASHUAI_FOREGROUND" in text
     assert "run_desktop.py" in text
-    assert "do shell script" in text or "nohup" in text
+    assert "nohup" in text and "DESKTOP_PY" in text
+    assert "do shell script" not in text  # GUI must not launch via osascript
+    assert "from packaging.run_desktop" not in text
+    assert "LOG_OFF" in text and "port_alive" in text
     assert "绝不覆盖" in text or "不会覆盖" in text or "只在缺失时" in text
     desk_names = [x for x in names if x.endswith("packaging/run_desktop.py")]
     assert desk_names, "no run_desktop.py"
