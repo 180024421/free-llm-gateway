@@ -58,6 +58,8 @@ def _hide_console() -> None:
 # Real quit vs hide-to-tray (macOS menu bar / window close box)
 _FORCE_QUIT = False
 _STATUS_KEEPALIVE: list[object] = []
+_UI_BOOT_AT = 0.0
+_ALLOW_HIDE_TO_TRAY = False
 
 
 def _request_quit() -> None:
@@ -119,6 +121,15 @@ def _show_window(window) -> None:
 
 def _hide_to_menubar(window) -> None:
     """Hide main window and drop Dock icon; keep top-right menu bar item."""
+    # pywebview/Cocoa 偶发在启动瞬间误触 closing/minimized；过早藏窗会「只有终端、没有界面」
+    if not _ALLOW_HIDE_TO_TRAY or (time.time() - _UI_BOOT_AT) < 4.0:
+        _log("mac hide-to-menubar ignored (boot grace)")
+        try:
+            _show_window(window)
+        except Exception:
+            pass
+        return
+    _log("mac hide-to-menubar")
     try:
         window.hide()
     except Exception:
@@ -135,6 +146,38 @@ def _show_or_hide(window, hide: bool = False) -> None:
             _show_window(window)
     except Exception:
         pass
+
+
+def _arm_hide_to_tray_later() -> None:
+    """Allow close-box → menubar only after UI has been visible a few seconds."""
+    global _ALLOW_HIDE_TO_TRAY
+
+    def _enable() -> None:
+        global _ALLOW_HIDE_TO_TRAY
+        _ALLOW_HIDE_TO_TRAY = True
+        _log("mac hide-to-menubar armed")
+
+    try:
+        t = threading.Timer(5.0, _enable)
+        t.daemon = True
+        t.start()
+    except Exception:
+        _ALLOW_HIDE_TO_TRAY = True
+
+
+def _mac_prepare_gui() -> None:
+    """Force a normal Dock/GUI app before webview starts (needed for portable Python)."""
+    if sys.platform != "darwin":
+        return
+    try:
+        from AppKit import NSApplication, NSApplicationActivationPolicyRegular
+
+        app = NSApplication.sharedApplication()
+        app.setActivationPolicy_(NSApplicationActivationPolicyRegular)
+        app.activateIgnoringOtherApps_(True)
+        _log("mac gui policy regular")
+    except Exception as exc:
+        _log(f"mac gui prepare failed: {exc!r}")
 
 
 def _setup_mac_menubar(window, title: str) -> None:
@@ -571,6 +614,15 @@ def main() -> None:
     _prepare_env(root)
     _log(f"start frozen={getattr(sys, 'frozen', False)} root={root}")
 
+    # Mac 启动脚本用 pidfile 判断是否已在跑
+    try:
+        if sys.platform == "darwin":
+            pid_path = _data_dir() / "desktop.pid"
+            pid_path.parent.mkdir(parents=True, exist_ok=True)
+            pid_path.write_text(str(os.getpid()), encoding="utf-8")
+    except Exception:
+        pass
+
     try:
         from gateway.integrity import PRODUCT_WATERMARK, soft_anti_debug, verify_critical_files
 
@@ -687,6 +739,11 @@ def main() -> None:
 
     import webview
 
+    global _UI_BOOT_AT
+    _UI_BOOT_AT = time.time()
+    if sys.platform == "darwin":
+        _mac_prepare_gui()
+
     window = webview.create_window(
         title=f"{__product__}  v{__version__}",
         url=ui,
@@ -724,6 +781,11 @@ def main() -> None:
         if _FORCE_QUIT or sys.platform != "darwin":
             os._exit(0)
 
+    def _on_shown() -> None:
+        _log("window shown")
+        _show_window(window)
+        _arm_hide_to_tray_later()
+
     try:
         window.events.closing += _on_closing
     except Exception:
@@ -736,6 +798,11 @@ def main() -> None:
         window.events.closed += _on_closed
     except Exception:
         pass
+    try:
+        window.events.shown += _on_shown
+    except Exception:
+        # older pywebview: arm tray hide after delay anyway
+        _arm_hide_to_tray_later()
 
     if sys.platform == "darwin":
         _setup_mac_menubar(window, f"{__product__} v{__version__}")
@@ -745,6 +812,8 @@ def main() -> None:
     threading.Thread(target=_tray_failure_watcher, args=(port,), daemon=True, name="dashuai-fail-watch").start()
     if sys.platform == "darwin":
         try:
+            # 再激活一次，避免从 .command/nohup 拉起时窗口在后台
+            threading.Timer(1.2, lambda: _show_window(window)).start()
             webview.start(debug=False)
         except Exception as exc:
             _log(f"webview cocoa failed: {exc!r}")

@@ -1,0 +1,8 @@
+#!/bin/bash
+# 大帅网关.app 入口：由 LaunchServices 拉起，才能稳定拿到 Aqua/GUI 会话
+# 路径：大帅网关-mac-arm64/大帅网关.app/Contents/MacOS/大帅网关
+set -e
+HERE="$(cd "$(dirname "$0")" && pwd)"
+ROOT="$(cd "$HERE/../../.." && pwd)"
+export DASHUAI_FROM_APP=1
+exec /bin/bash "$ROOT/启动大帅网关.command" --run

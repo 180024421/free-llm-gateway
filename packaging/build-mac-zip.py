@@ -317,7 +317,8 @@ def _zip_dir(src: Path, zip_path: Path) -> None:
             mode = 0o755 if (
                 path.suffix == ".command"
                 or "bin/" in arc
-                or path.name in {"python3", "python"}
+                or path.name in {"python3", "python", "大帅网关"}
+                or "/MacOS/" in arc
             ) else 0o644
             zi.external_attr = (mode & 0xFFFF) << 16
             zi.compress_type = zipfile.ZIP_DEFLATED
@@ -356,17 +357,26 @@ def build_one(arch: str, tag: str, py_ver: str) -> Path:
     app = bundle / "app"
     _copy_app(app)
 
-    # launcher + readme
+    # launcher + readme + .app (LaunchServices GUI)
     launcher_src = ROOT / "packaging" / "mac" / "启动大帅网关.command"
     readme_src = ROOT / "packaging" / "mac" / "首次打开说明.txt"
     launcher_dst = bundle / "启动大帅网关.command"
-    # force LF
     text = launcher_src.read_text(encoding="utf-8").replace("\r\n", "\n").replace("\r", "\n")
     launcher_dst.write_text(text, encoding="utf-8", newline="\n")
     shutil.copy2(readme_src, bundle / "首次打开说明.txt")
     upgrade_src = ROOT / "packaging" / "mac" / "升级保留配置.txt"
     if upgrade_src.exists():
         shutil.copy2(upgrade_src, bundle / "升级保留配置.txt")
+
+    stub_dir = ROOT / "packaging" / "mac" / "AppStub"
+    mac_app = bundle / "大帅网关.app"
+    macos_dir = mac_app / "Contents" / "MacOS"
+    macos_dir.mkdir(parents=True, exist_ok=True)
+    (mac_app / "Contents").mkdir(parents=True, exist_ok=True)
+    shutil.copy2(stub_dir / "Info.plist", mac_app / "Contents" / "Info.plist")
+    exe_name = "大帅网关"
+    stub_bin = (stub_dir / exe_name).read_text(encoding="utf-8").replace("\r\n", "\n").replace("\r", "\n")
+    (macos_dir / exe_name).write_text(stub_bin, encoding="utf-8", newline="\n")
 
     (bundle / "data").mkdir(exist_ok=True)
 

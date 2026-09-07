@@ -1,19 +1,22 @@
 #!/bin/bash
-# 大帅网关 Mac 便携启动（务必整夹保留：app / runtime / wheels）
+# 大帅网关 Mac 便携启动（务必整夹保留：app / runtime / wheels / 大帅网关.app）
 # 兼容：bash / 被 zsh 误执行 / Rosetta / 解压丢执行位
-# 启动后脱离 Terminal：关掉终端不影响网关（勿再「终止」会话内进程）
+#
+# 用法：
+#   双击「启动大帅网关.command」→ 准备环境后 open「大帅网关.app」（正规 GUI 会话）
+#   双击「大帅网关.app」→ 同样走本脚本 --run
+#   DASHUAI_FOREGROUND=1 → 前台挂在终端里跑（排障）
 
-# 若不是 bash，强制用系统 bash 重跑（避免 zsh+nounset 报 ARCH?）
 if [ -z "${BASH_VERSION-}" ]; then
   exec /bin/bash "$0" "$@"
   exit 1
 fi
 
 set -e
-# 故意不用 set -u / pipefail：旧 Bash / 杂项环境容易误伤
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 cd "$ROOT" || exit 1
+MODE="${1-}"
 
 alert() {
   MSG=$1
@@ -29,7 +32,6 @@ display alert "大帅网关" message "$MSG" as informational
 EOF
 }
 
-# 优先看包内实际目录，再看 uname（Rosetta 下 uname 可能是 x86_64）
 ARCH=""
 if [ -d "$ROOT/runtime/arm64" ]; then
   ARCH="arm64"
@@ -52,26 +54,27 @@ APP="$ROOT/app"
 DESKTOP_PY="$APP/packaging/run_desktop.py"
 LOG="$ROOT/data/desktop.log"
 PIDFILE="$ROOT/data/desktop.pid"
+MAC_APP="$ROOT/大帅网关.app"
 
 port_alive() {
-  # 默认 8010；若 data/config.json 有 port 则读它（失败则仍用 8010）
   P=8010
-  if [ -f "$ROOT/data/config.json" ]; then
-    P="$("$VENV/bin/python" -c "import json;print(json.load(open('$ROOT/data/config.json',encoding='utf-8-sig')).get('port') or 8010)" 2>/dev/null || echo 8010)"
+  if [ -f "$ROOT/data/config.json" ] && [ -x "$VENV/bin/python" ]; then
+    P="$("$VENV/bin/python" -c "import json;print(json.load(open(r'''$ROOT/data/config.json''',encoding='utf-8-sig')).get('port') or 8010)" 2>/dev/null || echo 8010)"
   fi
   /usr/bin/curl -fsS --max-time 1 "http://127.0.0.1:${P}/api/overview" >/dev/null 2>&1
 }
 
-# 解除隔离属性（从浏览器下载后常见；失败忽略）
 /usr/bin/xattr -dr com.apple.quarantine "$ROOT" >/dev/null 2>&1 || true
 
-# 解压后常见：文件在但丢了 +x
 if [ -f "$PY" ] && [ ! -x "$PY" ]; then
   chmod +x "$PY" 2>/dev/null || true
   chmod +x "$PY_HOME/bin/python" 2>/dev/null || true
 fi
 if [ -d "$PY_HOME/bin" ]; then
   chmod +x "$PY_HOME/bin/"* 2>/dev/null || true
+fi
+if [ -f "$MAC_APP/Contents/MacOS/大帅网关" ]; then
+  chmod +x "$MAC_APP/Contents/MacOS/大帅网关" 2>/dev/null || true
 fi
 
 if [ ! -f "$PY" ]; then
@@ -92,7 +95,6 @@ if [ ! -f "$DESKTOP_PY" ]; then
   exit 1
 fi
 
-# 首次运行：优先离线 wheels；失败则联网补齐
 if [ ! -x "$VENV/bin/python" ]; then
   echo "[大帅网关] 首次启动，正在准备运行环境（只需一次）…"
   "$PY" -m venv "$VENV"
@@ -121,8 +123,6 @@ fi
 export DASHUAI_DATA_DIR="$ROOT/data"
 export DASHUAI_COMMERCIAL=1
 export DASHUAI_BUNDLE_DIR="$ROOT"
-# 必须把 app 放在最前；且不要用「import packaging.run_desktop」
-# （会与 pip 自带的 packaging 包撞名导致秒退、窗口永不出现）
 if [ -n "${PYTHONPATH-}" ]; then
   export PYTHONPATH="$APP:$PYTHONPATH"
 else
@@ -130,116 +130,67 @@ else
 fi
 
 mkdir -p "$ROOT/data"
-# 只在缺失时从模板复制，绝不覆盖用户已有 config/providers/routers
 for name in config providers routers; do
   if [ ! -f "$ROOT/data/${name}.json" ] && [ -f "$APP/data/${name}.example.json" ]; then
     cp "$APP/data/${name}.example.json" "$ROOT/data/${name}.json"
   fi
 done
-if [ ! -f "$ROOT/data/providers.json" ] && [ ! -f "$ROOT/data/session.json" ]; then
-  for cand in "$ROOT/../大帅网关-mac-arm64/data" "$ROOT/../大帅网关-mac-arm64.bak/data" "$ROOT/../大帅网关-mac-arm64-旧/data"; do
-    if [ -f "$cand/providers.json" ] || [ -f "$cand/session.json" ]; then
-      echo "[大帅网关] 检测到可能的旧配置：$cand"
-      echo "[大帅网关] 如需保留 API Key/登录态，请把该目录复制为：$ROOT/data"
-      break
-    fi
-  done
-fi
 
 cd "$APP"
 
-# 调试：DASHUAI_FOREGROUND=1 /bin/bash 启动大帅网关.command
-if [ "${DASHUAI_FOREGROUND-}" = "1" ]; then
-  echo "[大帅网关] 前台模式启动（本窗口需一直开着）…"
+# --run：由 .app 或前台模式真正执行桌面壳（必须前台，才能出窗口）
+if [ "$MODE" = "--run" ] || [ "${DASHUAI_FROM_APP-}" = "1" ] || [ "${DASHUAI_FOREGROUND-}" = "1" ]; then
+  echo "[大帅网关] 正在打开独立窗口…"
+  echo "[大帅网关] 日志：$LOG"
+  : >>"$LOG"
+  echo "[大帅网关] ---- run $(/bin/date '+%Y-%m-%d %H:%M:%S') ----" >>"$LOG"
   exec "$VENV/bin/python" "$DESKTOP_PY"
 fi
 
-# 已在跑：接口通 → 提示菜单栏；进程在但服务挂 → 清掉僵死进程后重开
+# 已在跑
 if [ -f "$PIDFILE" ]; then
   OLD_PID="$(cat "$PIDFILE" 2>/dev/null || true)"
   if [ -n "${OLD_PID-}" ] && kill -0 "$OLD_PID" 2>/dev/null; then
     if port_alive; then
-      info "大帅网关似乎已在运行（PID $OLD_PID）。\n\n请看屏幕右上角菜单栏「大帅」→「显示窗口」。\n若没有窗口，浏览器打开 http://127.0.0.1:8010/ui/\n真正退出请点菜单「退出网关」。"
+      info "大帅网关似乎已在运行（PID $OLD_PID）。\n\n请看 Dock / 菜单栏「大帅」→「显示窗口」。\n或浏览器打开 http://127.0.0.1:8010/ui/"
+      # 再激活一次 .app
+      if [ -d "$MAC_APP" ]; then
+        /usr/bin/open "$MAC_APP" >/dev/null 2>&1 || true
+      fi
       exit 0
     fi
-    echo "[大帅网关] 发现僵死进程 PID $OLD_PID（端口无响应），正在清理后重启…"
+    echo "[大帅网关] 发现僵死进程 PID $OLD_PID，正在清理…"
     kill "$OLD_PID" 2>/dev/null || true
-    sleep 0.6
+    sleep 0.5
     kill -9 "$OLD_PID" 2>/dev/null || true
     rm -f "$PIDFILE"
   fi
 fi
 
-echo "[大帅网关] 正在后台启动独立窗口…"
-echo "[大帅网关] 日志：$LOG"
-
-# 必须从当前 Terminal 会话 nohup 启动（继承 Aqua/GUI）。
-# 禁止经 AppleScript 间接拉 GUI：进程常能起来（有 PID），但 pywebview 窗口/菜单栏不出现。
-# disown 后关掉终端窗口一般不会带走子进程；若系统弹出「是否终止进程」请点「取消」。
-mkdir -p "$ROOT/data"
-: >>"$LOG"
-LOG_OFF="$(/usr/bin/wc -c <"$LOG" | /usr/bin/tr -d ' ')"
-echo "[大帅网关] ---- launch $(/bin/date '+%Y-%m-%d %H:%M:%S') ----" >>"$LOG"
-
-nohup "$VENV/bin/python" "$DESKTOP_PY" >>"$LOG" 2>&1 &
-echo $! >"$PIDFILE"
-disown >/dev/null 2>&1 || true
-
-new_log() {
-  # 只看本次启动之后追加的日志，避免历史「server ready」误判成功
-  /usr/bin/tail -c +"$((LOG_OFF + 1))" "$LOG" 2>/dev/null || true
-}
-
-# 等待进程 + 服务就绪（不只看 PID）
-ok=0
-ready=0
-i=0
-while [ "$i" -lt 45 ]; do
-  i=$((i + 1))
-  NEW_PID="$(cat "$PIDFILE" 2>/dev/null || true)"
-  if [ -n "${NEW_PID-}" ] && kill -0 "$NEW_PID" 2>/dev/null; then
-    ok=1
+# 优先用 .app（LaunchServices），解决「终端说已启动但没有界面」
+if [ -d "$MAC_APP/Contents/MacOS" ]; then
+  echo "[大帅网关] 正在通过「大帅网关.app」启动独立窗口…"
+  echo "[大帅网关] 日志：$LOG"
+  /usr/bin/open "$MAC_APP"
+  ok=0
+  i=0
+  while [ "$i" -lt 40 ]; do
+    i=$((i + 1))
     if port_alive; then
-      ready=1
-      sleep 0.8
+      ok=1
       break
     fi
-    # 日志级就绪（port 可能稍慢于 menubar）
-    if new_log | /usr/bin/grep -E -q "server ready on|mac menubar ready"; then
-      ready=1
-      sleep 0.8
-      break
-    fi
+    sleep 0.4
+  done
+  if [ "$ok" -eq 1 ]; then
+    echo "[大帅网关] 服务已就绪。主窗口应已出现在 Dock / 前台。"
+    echo "[大帅网关] 若仍没有窗口：点 Dock 里的「大帅网关」或「Python」，或打开 http://127.0.0.1:8010/ui/"
+    echo "[大帅网关] 本终端可关掉。"
+    exit 0
   fi
-  if new_log | /usr/bin/grep -E -q "Integrity fail|webview .*failed|uvicorn failed|wait_ready failed|Traceback"; then
-    break
-  fi
-  sleep 0.4
-done
-
-if [ "$ok" -ne 1 ]; then
-  TAIL=""
-  if [ -f "$LOG" ]; then
-    TAIL="$(new_log | /usr/bin/tail -n 18 | /usr/bin/tr -d '\r' | /usr/bin/sed 's/\"//g')"
-  fi
-  alert "独立窗口没有成功起来。\n\n请把下面日志发给客服，或用前台模式排查：\n/bin/bash -lc 'DASHUAI_FOREGROUND=1 \"${ROOT}/启动大帅网关.command\"'\n\n日志尾部：\n${TAIL:-(空)}"
-  exit 1
+  echo "[大帅网关] .app 启动超时，改在本终端前台启动…"
 fi
 
-UI_HINT="http://127.0.0.1:8010/ui/"
-if [ -f "$ROOT/data/config.json" ]; then
-  UI_HINT="$("$VENV/bin/python" -c "import json;p=json.load(open('$ROOT/data/config.json',encoding='utf-8-sig')).get('port') or 8010;print(f'http://127.0.0.1:{p}/ui/')" 2>/dev/null || echo "$UI_HINT")"
-fi
-
-if [ "$ready" -ne 1 ]; then
-  echo "[大帅网关] 进程已在跑，但窗口/服务尚未确认就绪。请看右上角菜单栏「大帅」，或打开："
-  echo "  $UI_HINT"
-  echo "[大帅网关] 仍无界面时请查看：$LOG"
-  echo "[大帅网关] 或前台模式：DASHUAI_FOREGROUND=1 /bin/bash \"$ROOT/启动大帅网关.command\""
-else
-  echo "[大帅网关] 已启动（PID $(cat "$PIDFILE" 2>/dev/null)）。"
-  echo "[大帅网关] 主窗口应已弹出；若只见菜单栏，点右上角「大帅」→「显示窗口」。"
-  echo "[大帅网关] 也可浏览器打开：$UI_HINT"
-fi
-echo "[大帅网关] 本终端可直接关掉（若弹出「终止进程」请点取消，不要点终止）。"
-exit 0
+echo "[大帅网关] 前台启动独立窗口（请保持本终端开着）…"
+echo "[大帅网关] 日志：$LOG"
+exec "$VENV/bin/python" "$DESKTOP_PY"
