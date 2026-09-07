@@ -3,9 +3,9 @@ chcp 65001 >nul
 cd /d "%~dp0\.."
 REM 打包 + 发布远程更新（需本机已配 deploy-pilot/config/projects.yaml）
 set VER=%1
-if "%VER%"=="" set VER=0.4.4
+if "%VER%"=="" set VER=0.4.5
 set CODE=%2
-if "%CODE%"=="" set CODE=44
+if "%CODE%"=="" set CODE=45
 
 echo [1/2] 打包 EXE ...
 call packaging\build-exe.cmd

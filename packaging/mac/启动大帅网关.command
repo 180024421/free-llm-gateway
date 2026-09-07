@@ -1,7 +1,7 @@
 #!/bin/bash
 # 大帅网关 Mac 便携启动（务必整夹保留：app / runtime / wheels）
 # 兼容：bash / 被 zsh 误执行 / Rosetta / 解压丢执行位
-# 启动后会脱离 Terminal：终端窗口可关掉，网关继续在菜单栏运行
+# 启动后脱离 Terminal：关掉终端不影响网关（勿再「终止」会话内进程）
 
 # 若不是 bash，强制用系统 bash 重跑（避免 zsh+nounset 报 ARCH?）
 if [ -z "${BASH_VERSION-}" ]; then
@@ -19,6 +19,13 @@ alert() {
   MSG=$1
   /usr/bin/osascript <<EOF >/dev/null 2>&1 || true
 display alert "大帅网关" message "$MSG" as critical
+EOF
+}
+
+info() {
+  MSG=$1
+  /usr/bin/osascript <<EOF >/dev/null 2>&1 || true
+display alert "大帅网关" message "$MSG" as informational
 EOF
 }
 
@@ -42,6 +49,12 @@ PY="$PY_HOME/bin/python3"
 VENV="$ROOT/runtime/venv-$ARCH"
 WHEELS="$ROOT/wheels/$ARCH"
 APP="$ROOT/app"
+DESKTOP_PY="$APP/packaging/run_desktop.py"
+LOG="$ROOT/data/desktop.log"
+PIDFILE="$ROOT/data/desktop.pid"
+
+# 解除隔离属性（从浏览器下载后常见；失败忽略）
+/usr/bin/xattr -dr com.apple.quarantine "$ROOT" >/dev/null 2>&1 || true
 
 # 解压后常见：文件在但丢了 +x
 if [ -f "$PY" ] && [ ! -x "$PY" ]; then
@@ -63,6 +76,10 @@ if [ ! -x "$PY" ]; then
 fi
 if [ ! -d "$APP" ]; then
   alert "缺少 app 目录，请重新解压完整安装包。"
+  exit 1
+fi
+if [ ! -f "$DESKTOP_PY" ]; then
+  alert "缺少 app/packaging/run_desktop.py，请重新解压完整安装包。"
   exit 1
 fi
 
@@ -95,6 +112,8 @@ fi
 export DASHUAI_DATA_DIR="$ROOT/data"
 export DASHUAI_COMMERCIAL=1
 export DASHUAI_BUNDLE_DIR="$ROOT"
+# 必须把 app 放在最前；且不要用「import packaging.run_desktop」
+# （会与 pip 自带的 packaging 包撞名导致秒退、窗口永不出现）
 if [ -n "${PYTHONPATH-}" ]; then
   export PYTHONPATH="$APP:$PYTHONPATH"
 else
@@ -108,7 +127,6 @@ for name in config providers routers; do
     cp "$APP/data/${name}.example.json" "$ROOT/data/${name}.json"
   fi
 done
-# 若 data 几乎是空的但旁边有旧版备份，提示用户（不自动覆盖，避免误伤）
 if [ ! -f "$ROOT/data/providers.json" ] && [ ! -f "$ROOT/data/session.json" ]; then
   for cand in "$ROOT/../大帅网关-mac-arm64/data" "$ROOT/../大帅网关-mac-arm64.bak/data" "$ROOT/../大帅网关-mac-arm64-旧/data"; do
     if [ -f "$cand/providers.json" ] || [ -f "$cand/session.json" ]; then
@@ -121,26 +139,80 @@ fi
 
 cd "$APP"
 
-# 默认后台启动并脱离 Terminal：关掉终端窗口不影响网关
-# 调试可：DASHUAI_FOREGROUND=1 /bin/bash 启动大帅网关.command
-if [ "${DASHUAI_FOREGROUND-}" != "1" ]; then
-  echo "[大帅网关] 正在后台启动独立窗口（可关掉本终端）…"
-  nohup "$VENV/bin/python" -c "from packaging.run_desktop import main; main()" \
-    >>"$ROOT/data/desktop.log" 2>&1 &
-  disown >/dev/null 2>&1 || true
-  # 稍等窗口起来；失败时用户可看 data/desktop.log
-  sleep 1
-  # 关闭本次 .command 打开的 Terminal 窗口（不影响用户其它终端）
-  /usr/bin/osascript >/dev/null 2>&1 <<'APPLESCRIPT' || true
-tell application "Terminal"
-  try
-    if (count of windows) > 0 then
-      close front window
-    end if
-  end try
-end tell
-APPLESCRIPT
-  exit 0
+# 调试：DASHUAI_FOREGROUND=1 /bin/bash 启动大帅网关.command
+if [ "${DASHUAI_FOREGROUND-}" = "1" ]; then
+  echo "[大帅网关] 前台模式启动（本窗口需一直开着）…"
+  exec "$VENV/bin/python" "$DESKTOP_PY"
 fi
 
-exec "$VENV/bin/python" -c "from packaging.run_desktop import main; main()"
+# 已在跑则提示，避免重复开多个
+if [ -f "$PIDFILE" ]; then
+  OLD_PID="$(cat "$PIDFILE" 2>/dev/null || true)"
+  if [ -n "${OLD_PID-}" ] && kill -0 "$OLD_PID" 2>/dev/null; then
+    info "大帅网关似乎已在运行（PID $OLD_PID）。\n\n请看屏幕右上角菜单栏「大帅」→「显示窗口」。\n若没有，请先「退出网关」再重新启动。"
+    exit 0
+  fi
+fi
+
+echo "[大帅网关] 正在后台启动独立窗口…"
+echo "[大帅网关] 日志：$LOG"
+
+# 用 osascript「do shell script」拉起进程，归属 launchd，不被 Terminal 关掉时带走
+# 注意：路径含中文时用单引号包起来；日志追加写入
+QS_ROOT="${ROOT//\'/\'\\\'\'}"
+QS_APP="${APP//\'/\'\\\'\'}"
+QS_PY="${VENV//\'/\'\\\'\'}/bin/python"
+QS_DESK="${DESKTOP_PY//\'/\'\\\'\'}"
+QS_LOG="${LOG//\'/\'\\\'\'}"
+QS_PID="${PIDFILE//\'/\'\\\'\'}"
+
+LAUNCH_CMD="export DASHUAI_DATA_DIR='${QS_ROOT}/data'; export DASHUAI_COMMERCIAL=1; export DASHUAI_BUNDLE_DIR='${QS_ROOT}'; export PYTHONPATH='${QS_APP}'; cd '${QS_APP}'; nohup '${QS_PY}' '${QS_DESK}' >>'${QS_LOG}' 2>&1 & echo \$! >'${QS_PID}'"
+
+set +e
+/usr/bin/osascript >/dev/null 2>&1 <<APPLESCRIPT
+do shell script "$LAUNCH_CMD"
+APPLESCRIPT
+AS_RC=$?
+set -e
+
+if [ "$AS_RC" -ne 0 ]; then
+  # 回退：本机 nohup（部分环境禁用 osascript do shell script）
+  echo "[大帅网关] osascript 启动失败，改用本机后台启动…"
+  nohup "$VENV/bin/python" "$DESKTOP_PY" >>"$LOG" 2>&1 &
+  echo $! >"$PIDFILE"
+  disown >/dev/null 2>&1 || true
+fi
+
+# 等待进程起来；失败则弹窗展示日志尾部（方便排查）
+ok=0
+i=0
+while [ "$i" -lt 25 ]; do
+  i=$((i + 1))
+  NEW_PID="$(cat "$PIDFILE" 2>/dev/null || true)"
+  if [ -n "${NEW_PID-}" ] && kill -0 "$NEW_PID" 2>/dev/null; then
+    ok=1
+    # 再等一会儿让窗口创建
+    sleep 1
+    break
+  fi
+  # 日志里若已有明确失败，提前跳出
+  if [ -f "$LOG" ] && /usr/bin/grep -E -q "Integrity fail|webview .*failed|uvicorn failed|wait_ready failed|Traceback" "$LOG" 2>/dev/null; then
+    break
+  fi
+  sleep 0.4
+done
+
+if [ "$ok" -ne 1 ]; then
+  TAIL=""
+  if [ -f "$LOG" ]; then
+    TAIL="$(/usr/bin/tail -n 18 "$LOG" 2>/dev/null | /usr/bin/tr -d '\r' | /usr/bin/sed 's/\"//g')"
+  fi
+  alert "独立窗口没有成功起来。\n\n请把下面日志发给客服，或用前台模式排查：\n/bin/bash -lc 'DASHUAI_FOREGROUND=1 \"${ROOT}/启动大帅网关.command\"'\n\n日志尾部：\n${TAIL:-(空)}"
+  exit 1
+fi
+
+echo "[大帅网关] 已启动（PID $(cat "$PIDFILE" 2>/dev/null)）。"
+echo "[大帅网关] 主窗口应已弹出；若只见菜单栏，点右上角「大帅」→「显示窗口」。"
+echo "[大帅网关] 本终端可直接关掉（不要点「终止」去杀进程）。"
+# 不再用 AppleScript 强关 Terminal（会弹出「终止 bash/osascript？」误伤后台进程）
+exit 0
