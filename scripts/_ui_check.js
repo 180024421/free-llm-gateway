@@ -23,7 +23,7 @@ function toast(msg, err=false){
   el.classList.toggle("err", !!err);
   el.classList.add("show");
   clearTimeout(toast._t);
-  toast._t = setTimeout(() => el.classList.remove("show"), 3200);
+  toast._t = setTimeout(() => el.classList.remove("show"), err ? 8000 : 3200);
 }
 
 function errText(x, fallback="操作失败"){
@@ -48,9 +48,64 @@ function authHeaders(){
 async function copyText(text){
   const t = String(text || "").trim();
   if (!t) return;
-  await navigator.clipboard.writeText(t);
-  toast("已复制");
+  try {
+    await navigator.clipboard.writeText(t);
+    toast("已复制");
+  } catch (_) {
+    toast("复制失败，请选中文本后手动复制", true);
+  }
 }
+
+async function showAndroidPairing(){
+  const box = $("#androidPairBox");
+  const hint = $("#androidPairHint");
+  const img = $("#androidPairQr");
+  const copy = $("#btnCopyPairCode");
+  if (box) box.style.display = "";
+  if (hint) hint.textContent = "正在生成本机连接信息…";
+  try {
+    let response = await fetch("/api/android/pairing", { headers: authHeaders() });
+    let data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(errText(data, "生成失败"));
+    if (data.bind_localhost) {
+      if (!confirm("手机连接需要允许同一 WiFi 内的设备访问网关。是否开启局域网监听？开启后请重启大帅网关。")) {
+        if (hint) hint.textContent = "已取消。当前网关只允许本机访问。";
+        return;
+      }
+      const configResponse = await fetch("/api/config", { headers: authHeaders() });
+      const config = await configResponse.json();
+      config.host = "0.0.0.0";
+      const saved = await fetch("/api/config", {
+        method: "PUT",
+        headers: authHeaders(),
+        body: JSON.stringify(config),
+      });
+      if (!saved.ok) throw new Error("无法开启局域网监听");
+      response = await fetch("/api/android/pairing", { headers: authHeaders() });
+      data = await response.json().catch(() => ({}));
+    }
+    state.androidPairingCode = data.pairing_code || "";
+    if (copy) copy.style.display = state.androidPairingCode ? "" : "none";
+    const qrResponse = await fetch("/api/android/pairing.svg", { headers: authHeaders() });
+    if (!qrResponse.ok) throw new Error("二维码组件不可用");
+    const blob = await qrResponse.blob();
+    if (state.androidPairQrUrl) URL.revokeObjectURL(state.androidPairQrUrl);
+    state.androidPairQrUrl = URL.createObjectURL(blob);
+    if (img) {
+      img.src = state.androidPairQrUrl;
+      img.style.display = "";
+    }
+    if (hint) hint.textContent = data.bind_localhost
+      ? "连接信息已生成。请先重启网关，再用 Android 扫码连接。"
+      : ((data.base_url || "") + " · Android 扫码后会自动测试连接");
+  } catch (error) {
+    if (hint) hint.textContent = "生成失败：" + (error.message || error);
+    toast("生成 Android 连接信息失败：" + (error.message || error), true);
+  }
+}
+
+if ($("#btnAndroidPair")) $("#btnAndroidPair").onclick = () => showAndroidPairing();
+if ($("#btnCopyPairCode")) $("#btnCopyPairCode").onclick = () => copyText(state.androidPairingCode || "");
 
 const PRESETS = {
   NVIDIA: {
@@ -414,9 +469,11 @@ async function saveAdvancedSettings(){
     const cn = $("#cnOnlyToggle2") || $("#cnOnlyToggle");
     const ex = $("#exposeUpstreamToggle2");
     const asw = $("#autoSyncWbToggle");
+    const adaptive = $("#adaptiveRouteToggle");
     if (cn) cur.cn_only = !!cn.checked;
     if (ex) cur.expose_upstream_model = !!ex.checked;
     if (asw) cur.auto_sync_workbuddy = !!asw.checked;
+    if (adaptive) cur.adaptive_route_intent = !!adaptive.checked;
     ["#cnOnlyToggle", "#cnOnlyToggle2"].forEach(sel => { const el = $(sel); if (el && cn) el.checked = !!cn.checked; });
     const r = await fetch("/api/config", { method: "PUT", headers: authHeaders(), body: JSON.stringify(cur) });
     if (!r.ok) throw new Error("save");
@@ -476,6 +533,7 @@ if ($("#usageAsyncToggle")) $("#usageAsyncToggle").onchange = () => saveAdvanced
 if ($("#cnOnlyToggle2")) $("#cnOnlyToggle2").onchange = () => saveAdvancedSettings();
 if ($("#exposeUpstreamToggle2")) $("#exposeUpstreamToggle2").onchange = () => saveAdvancedSettings();
 if ($("#autoSyncWbToggle")) $("#autoSyncWbToggle").onchange = () => saveAdvancedSettings();
+if ($("#adaptiveRouteToggle")) $("#adaptiveRouteToggle").onchange = () => saveAdvancedSettings();
 if ($("#cnOnlyToggle")) $("#cnOnlyToggle").onchange = () => saveNetPrefs();
 if ($("#btnSaveNetPrefs")) $("#btnSaveNetPrefs").onclick = () => saveNetPrefs();
 if ($("#btnHomeSyncWb2")) $("#btnHomeSyncWb2").onclick = () => syncWorkBuddy();
@@ -543,13 +601,15 @@ function go(page){
   const leavingProviders = cur && cur.id === "page-providers" && page !== "providers";
   const leavingRoutes = cur && cur.id === "page-routes" && page !== "routes";
   if (leavingProviders && state.dirtyProviders) {
-    toast("上游渠道有未保存修改，请先点「保存全部」", true);
-    // 仍允许切换，但不触发会覆盖本地编辑的 refresh
+    if (!confirm("上游渠道有未保存修改，确定暂时离开？修改会保留在本页，刷新页面前请记得保存。")) return;
   }
   if (leavingRoutes && state.dirtyRoutes) {
     if (!confirm("路由有未保存修改，确定离开？未保存内容可能丢失。")) return;
   }
   $$(".nav button[data-page]").forEach(b => b.classList.toggle("active", b.dataset.page === page));
+  const activeNav = document.querySelector(`.nav button[data-page="${page}"]`);
+  const advanced = activeNav && activeNav.closest(".nav-advanced");
+  if (advanced) advanced.open = true;
   $$(".page").forEach(p => p.classList.toggle("active", p.id === `page-${page}`));
   const content = $(".content");
   if (content) content.scrollTop = 0;
@@ -725,10 +785,13 @@ function renderHome(j){
   const cn = !!j.config?.cn_only;
   const ex = j.config?.expose_upstream_model !== false;
   const asw = j.config?.auto_sync_workbuddy !== false;
+  const adaptive = j.config?.adaptive_route_intent !== false;
   ["#cnOnlyToggle", "#cnOnlyToggle2"].forEach(sel => { const el = $(sel); if (el) el.checked = cn; });
   ["#exposeUpstreamToggle2"].forEach(sel => { const el = $(sel); if (el) el.checked = ex; });
   const asEl = $("#autoSyncWbToggle");
   if (asEl) asEl.checked = asw;
+  const adaptiveEl = $("#adaptiveRouteToggle");
+  if (adaptiveEl) adaptiveEl.checked = adaptive;
   const cnHint = $("#cnOnlyHint");
   if (cnHint) {
     cnHint.textContent = cn
@@ -743,7 +806,7 @@ function renderHome(j){
   const steps = [
     { done: ready.length > 0, title: "粘贴至少一个上游 API Key", tip: "工作台粘贴框 →「导入并同步客户端」", action: "去粘贴", page: "home" },
     { done: !!j.config?.cn_only || ready.some(n => !/nvidia|gemini|openrouter|groq/i.test(String(n||""))), title: "国内模式（无 VPN）", tip: "勾选「仅使用国内渠道」；只贴魔搭会自动开启", action: "去开", page: "home" },
-    { done: Object.keys(routes).length > 0, title: "同步到本机客户端", tip: "导入并同步，或点顶栏「同步到本机客户端」", action: "同步", page: "home", sync: true },
+    { done: !!j.config?.last_client_sync_ok && Number(j.config?.last_client_sync_count || 0) > 0, title: "同步到本机客户端", tip: j.config?.last_client_sync_at ? ("最近同步：" + new Date(Number(j.config.last_client_sync_at) * 1000).toLocaleString()) : "导入并同步，或点顶栏「同步到本机客户端」", action: "同步", page: "home", sync: true },
     { done: (usage.total ?? 0) > 0 || !!(j.last_chat && j.last_chat.display_model), title: "发一次测试请求", tip: "客户端选「日常 · 大帅网关」随便问一句", action: "看用量", page: "home" },
   ];
   const doneCount = steps.filter(s => s.done).length;
@@ -1826,8 +1889,10 @@ document.body.addEventListener("click", (ev) => {
       const ready = j.providers_ready || [];
       if (!ready.length && !sessionStorage.getItem("dashuai_setup_seen")) {
         sessionStorage.setItem("dashuai_setup_seen", "1");
-        go("providers");
-        toast("粘贴上游 API Key → 点「保存并同步客户端」即可，不用改 WorkBuddy / Cursor 设置");
+        go("home");
+        const paste = $("#homePaste");
+        if (paste) paste.focus();
+        toast("先在工作台粘贴上游 API Key，再点「导入并同步客户端」");
       }
     } catch (_) {}
   }, 500);

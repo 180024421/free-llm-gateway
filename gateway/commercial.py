@@ -10,11 +10,10 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse, urlunparse
 
-PUBLIC_LICENSE_API_BASE = "http://111.229.202.251/api"
-# 公网统一走 IP HTTP（Nginx:80）；花生壳域名已弃用
-PUBLIC_LICENSE_API_BASE_HTTPS = "http://111.229.202.251/api"
+PUBLIC_LICENSE_API_BASE = "https://1ph1hf8043323.vicp.fun/api"
+PUBLIC_LICENSE_API_BASE_HTTPS = PUBLIC_LICENSE_API_BASE
+PUBLIC_LICENSE_API_BASE_FALLBACK = "http://111.229.202.251/api"
 _PUBLIC_HOST_RE = re.compile(
-    # 只改写直连 Java :8687，不要把 nginx :80 的 IP 入口误改
     r"https?://(?:111\.229\.202\.251:8687|1ph1hf8043323\.vicp\.fun:8687)(?=/|$)",
     re.IGNORECASE,
 )
@@ -25,25 +24,49 @@ def migrate_public_license_base(url: str) -> str:
     raw = (url or "").strip()
     if not raw:
         return raw
-    next_url = _PUBLIC_HOST_RE.sub("http://111.229.202.251", raw)
+    next_url = _PUBLIC_HOST_RE.sub("https://1ph1hf8043323.vicp.fun", raw)
     lowered = next_url.rstrip("/").lower()
     if lowered in {
         "https://1ph1hf8043323.vicp.fun",
         "http://1ph1hf8043323.vicp.fun",
         "https://1ph1hf8043323.vicp.fun/api",
         "http://1ph1hf8043323.vicp.fun/api",
+    }:
+        return PUBLIC_LICENSE_API_BASE
+    if lowered in {
         "http://111.229.202.251",
         "https://111.229.202.251",
         "http://111.229.202.251/api",
         "https://111.229.202.251/api",
     }:
-        return PUBLIC_LICENSE_API_BASE
-    # 花生壳域名一律落到可用的 HTTP IP 入口
-    if "1ph1hf8043323.vicp.fun" in lowered:
-        return PUBLIC_LICENSE_API_BASE
+        # Preserve explicitly configured IP fallback; only defaults prefer HTTPS.
+        return raw.rstrip("/")
     if next_url.lower().startswith("http://1ph1hf8043323.vicp.fun"):
-        return PUBLIC_LICENSE_API_BASE
+        return force_https_url(next_url)
     return next_url
+
+
+def apply_license_endpoint_defaults(cfg: dict[str, Any]) -> bool:
+    """Fill/migrate packaged public endpoints without changing custom addresses."""
+    changed = False
+    raw_primary = str(cfg.get("license_api_base") or "").strip()
+    primary = migrate_public_license_base(raw_primary)
+    # The bare public IP was the old packaged primary; it is now the HTTP fallback.
+    if not primary or primary.rstrip("/").lower() == PUBLIC_LICENSE_API_BASE_FALLBACK.lower():
+        primary = PUBLIC_LICENSE_API_BASE
+    if cfg.get("license_api_base") != primary:
+        cfg["license_api_base"] = primary
+        changed = True
+
+    raw_fallback = str(cfg.get("license_api_base_fallback") or "").strip()
+    if not raw_fallback:
+        cfg["license_api_base_fallback"] = PUBLIC_LICENSE_API_BASE_FALLBACK
+        changed = True
+
+    if primary == PUBLIC_LICENSE_API_BASE and cfg.get("license_allow_insecure_http") is True:
+        cfg["license_allow_insecure_http"] = False
+        changed = True
+    return changed
 
 
 def is_commercial_build(cfg: dict[str, Any] | None = None) -> bool:
@@ -129,13 +152,13 @@ def enforce_commercial_config(cfg: dict[str, Any] | None = None) -> dict[str, An
     changed = False
     commercial = is_commercial_build(cfg)
 
-    migrated = migrate_public_license_base(str(cfg.get("license_api_base") or ""))
-    if migrated and migrated != cfg.get("license_api_base"):
-        cfg["license_api_base"] = migrated
-        # Domain is HTTPS; drop legacy insecure flag used for bare IP HTTP.
-        if cfg.get("license_allow_insecure_http") is True and "1ph1hf8043323.vicp.fun" in migrated:
-            cfg["license_allow_insecure_http"] = False
+    if commercial and apply_license_endpoint_defaults(cfg):
         changed = True
+    else:
+        migrated = migrate_public_license_base(str(cfg.get("license_api_base") or ""))
+        if migrated and migrated != cfg.get("license_api_base"):
+            cfg["license_api_base"] = migrated
+            changed = True
 
     base = force_https_url(str(cfg.get("license_api_base") or ""))
     if base and base != cfg.get("license_api_base"):
@@ -146,21 +169,6 @@ def enforce_commercial_config(cfg: dict[str, Any] | None = None) -> dict[str, An
         if cfg.get("require_license") is not True:
             cfg["require_license"] = True
             changed = True
-        if not (cfg.get("license_api_base") or "").strip():
-            # Keep example default so UI can still talk to shop when present in example.
-            try:
-                from .config import DATA_DIR
-
-                example = DATA_DIR / "config.example.json"
-                if not example.exists():
-                    example = Path(__file__).resolve().parent.parent / "data" / "config.example.json"
-                if example.exists():
-                    ex = json.loads(example.read_text(encoding="utf-8-sig"))
-                    if isinstance(ex, dict) and ex.get("license_api_base"):
-                        cfg["license_api_base"] = force_https_url(str(ex["license_api_base"]))
-                        changed = True
-            except Exception:
-                pass
         cfg.setdefault("license_online_cache_sec", 600)
         cfg.setdefault("license_offline_grace_sec", 7200)
         cfg.setdefault("license_reserve_tokens", 128)

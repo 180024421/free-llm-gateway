@@ -11,6 +11,7 @@ from typing import Any
 from .config import DATA_DIR
 
 HEALTH_PATH = DATA_DIR / "channel_health.json"
+_PERF_STATS_VERSION = 2
 _lock = threading.RLock()
 _save_timer: threading.Timer | None = None
 
@@ -24,15 +25,28 @@ def load_persisted() -> dict[str, dict[str, Any]]:
         return {}
     if not isinstance(raw, dict):
         return {}
+    meta = raw.get("_meta")
+    stored_version = int(meta.get("performance_stats_version") or 0) if isinstance(meta, dict) else 0
+    legacy_probe_polluted = stored_version < _PERF_STATS_VERSION
     out: dict[str, dict[str, Any]] = {}
     now = time.time()
     for k, v in raw.items():
-        if not isinstance(v, dict):
+        if k == "_meta" or not isinstance(v, dict):
             continue
         open_until = float(v.get("open_until") or 0)
         if open_until and open_until < now - 86400:
             continue
-        out[str(k)] = v
+        item = dict(v)
+        if legacy_probe_polluted:
+            # Before v2, automatic probes updated these counters and latency,
+            # so persisted values cannot represent real customer requests.
+            item["successes"] = 0
+            item["failures"] = 0
+            item["consecutive_failures"] = 0
+            item["last_latency_ms"] = None
+            item["last_ttft_ms"] = None
+            item["last_ok_at"] = None
+        out[str(k)] = item
     return out
 
 
@@ -51,6 +65,7 @@ def apply_to_state(state: Any) -> None:
             ch.failures = int(v.get("failures") or 0)
             ch.consecutive_failures = int(v.get("consecutive_failures") or 0)
             ch.last_latency_ms = v.get("last_latency_ms")
+            ch.last_ttft_ms = v.get("last_ttft_ms")
             ch.last_error = v.get("last_error")
             ch.last_ok_at = v.get("last_ok_at")
             ch.last_fail_at = v.get("last_fail_at")
@@ -60,7 +75,9 @@ def apply_to_state(state: Any) -> None:
 
 
 def _write_now(state: Any) -> None:
-    snap: dict[str, dict[str, Any]] = {}
+    snap: dict[str, dict[str, Any]] = {
+        "_meta": {"performance_stats_version": _PERF_STATS_VERSION}
+    }
     with state.lock:
         for k, h in state.health.items():
             snap[k] = {
@@ -68,6 +85,7 @@ def _write_now(state: Any) -> None:
                 "failures": h.failures,
                 "consecutive_failures": h.consecutive_failures,
                 "last_latency_ms": h.last_latency_ms,
+                "last_ttft_ms": h.last_ttft_ms,
                 "last_error": h.last_error,
                 "last_ok_at": h.last_ok_at,
                 "last_fail_at": h.last_fail_at,

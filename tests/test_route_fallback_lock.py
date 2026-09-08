@@ -94,6 +94,60 @@ def test_custom_fallback_none(monkeypatch):
     assert all(m != "tiny-8b" for _p, m in ordered)
 
 
+def test_free_pool_is_appended_after_healthy_paid_candidates(monkeypatch):
+    from gateway import router as router_mod
+    from gateway.state import RuntimeState
+
+    monkeypatch.setattr(router_mod, "STATE", RuntimeState())
+    providers = [
+        {
+            "name": "Paid",
+            "enabled": True,
+            "api_key": "sk-paid",
+            "quota_tier": "daily",
+            "models": ["big-pro"],
+        },
+        {
+            "name": "Free",
+            "enabled": True,
+            "api_key": "sk-free",
+            "quota_tier": "free",
+            "models": ["tiny-8b"],
+        },
+    ]
+    ordered = resolve_candidates(
+        "日常",
+        providers,
+        {"日常": {"candidates": ["big-pro"], "fallback": "free_pool"}},
+    )
+    assert [(p["name"], m) for p, m in ordered] == [
+        ("Paid", "big-pro"),
+        ("Free", "tiny-8b"),
+    ]
+
+
+def test_fallback_none_excludes_matching_free_provider(monkeypatch):
+    from gateway import router as router_mod
+    from gateway.state import RuntimeState
+
+    monkeypatch.setattr(router_mod, "STATE", RuntimeState())
+    providers = [
+        {
+            "name": "Free",
+            "enabled": True,
+            "api_key": "sk-free",
+            "quota_tier": "free",
+            "models": ["big-pro"],
+        }
+    ]
+    ordered = resolve_candidates(
+        "复杂",
+        providers,
+        {"复杂": {"candidates": ["big-pro"], "fallback": "none"}},
+    )
+    assert ordered == []
+
+
 def test_maybe_rebuild_respects_lock(monkeypatch, tmp_path):
     from gateway import config as config_mod
     from gateway import route_builder as rb

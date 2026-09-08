@@ -58,7 +58,11 @@ def _provider_ready(p: dict[str, Any]) -> bool:
     return bool(models)
 
 
-def _probe_targets(providers: list[dict[str, Any]] | None = None) -> list[tuple[dict[str, Any], str]]:
+def _probe_targets(
+    providers: list[dict[str, Any]] | None = None,
+    *,
+    representative_only: bool = False,
+) -> list[tuple[dict[str, Any], str]]:
     providers = providers if providers is not None else load_providers()
     cn_only = False
     try:
@@ -77,11 +81,15 @@ def _probe_targets(providers: list[dict[str, Any]] | None = None) -> list[tuple[
                     continue
             except Exception:
                 pass
+        provider_targets: list[tuple[dict[str, Any], str]] = []
         for m in p.get("models") or []:
             model = str(m).strip()
             if not model or is_non_chat_model(model):
                 continue
-            out.append((p, model))
+            provider_targets.append((p, model))
+            if representative_only:
+                break
+        out.extend(provider_targets)
     return out
 
 
@@ -176,7 +184,9 @@ async def check_all(
     if timeout_sec is None:
         timeout_sec = min(60.0, float(cfg.get("request_timeout_sec") or 120))
 
-    targets = _probe_targets()
+    # Background checks are intentionally cheap: one representative chat
+    # model per provider. Manual checks still cover the full model matrix.
+    targets = _probe_targets(representative_only=quiet)
     total = len(targets)
     if not quiet:
         _set_status(

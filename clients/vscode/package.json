@@ -2,7 +2,7 @@
   "name": "dashuai-gateway",
   "displayName": "大帅网关",
   "description": "把 Cursor / VS Code 请求转发到本机大帅网关（OpenAI 兼容）",
-  "version": "0.3.0",
+  "version": "0.5.2",
   "publisher": "dashuai",
   "engines": {
     "vscode": "^1.85.0"
@@ -37,6 +37,10 @@
       {
         "command": "dashuai.showLicense",
         "title": "大帅网关: 查看授权状态"
+      },
+      {
+        "command": "dashuai.testConnection",
+        "title": "大帅网关: 测试连接"
       },
       {
         "command": "dashuai.applyCursorHint",

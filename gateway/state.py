@@ -12,6 +12,7 @@ class ChannelHealth:
     failures: int = 0
     consecutive_failures: int = 0
     last_latency_ms: float | None = None
+    last_ttft_ms: float | None = None
     last_error: str | None = None
     last_ok_at: float | None = None
     last_fail_at: float | None = None
@@ -34,10 +35,17 @@ class ChannelHealth:
             freshness = max(0.85, 1.0 - min(age, 3600) / 12000)
         return max(0.01, weight) * avail * latency_penalty * freshness
 
-    def mark_ok(self, latency_ms: float) -> None:
+    def mark_ok(self, latency_ms: float, *, ttft_ms: float | None = None) -> None:
         self.successes += 1
         self.consecutive_failures = 0
         self.last_latency_ms = latency_ms
+        if ttft_ms is not None:
+            sample = float(ttft_ms)
+            self.last_ttft_ms = (
+                sample
+                if self.last_ttft_ms is None
+                else (self.last_ttft_ms * 0.7 + sample * 0.3)
+            )
         self.last_ok_at = time.time()
         self.last_error = None
         self.open_until = 0.0
@@ -47,6 +55,18 @@ class ChannelHealth:
             schedule_save(STATE)
         except Exception:
             pass
+
+    def mark_probe_ok(self) -> None:
+        """Clear a breaker without polluting real-request latency/success learning."""
+        self.consecutive_failures = 0
+        self.last_error = None
+        self.open_until = 0.0
+
+    def mark_probe_fail(self, error: str, cooldown_sec: float = 30.0) -> None:
+        """Temporarily cool a failed probe without changing real-request counters."""
+        self.last_error = (error or "")[:500]
+        self.last_fail_at = time.time()
+        self.open_until = max(self.open_until, time.time() + max(5.0, cooldown_sec))
 
     def mark_fail(self, error: str, cooldown_sec: float = 30.0) -> None:
         self.failures += 1
@@ -191,6 +211,7 @@ class RuntimeState:
                         "failures": h.failures,
                         "consecutive_failures": h.consecutive_failures,
                         "last_latency_ms": h.last_latency_ms,
+                        "last_ttft_ms": h.last_ttft_ms,
                         "last_error": h.last_error,
                         "circuit_open": remain > 0,
                         "cooldown_remaining_sec": round(remain, 1),

@@ -5,7 +5,7 @@ plugins {
 }
 
 group = "com.dashuai"
-version = "0.3.0"
+version = "0.5.2"
 
 repositories {
     mavenCentral()

@@ -52,14 +52,35 @@ VENV="$ROOT/runtime/venv-$ARCH"
 WHEELS="$ROOT/wheels/$ARCH"
 APP="$ROOT/app"
 DESKTOP_PY="$APP/packaging/run_desktop.py"
-LOG="$ROOT/data/desktop.log"
-PIDFILE="$ROOT/data/desktop.pid"
+OLD_DATA="$ROOT/data"
+DATA_DIR="$HOME/Library/Application Support/DashuaiGateway"
+LOG="$DATA_DIR/desktop.log"
+PIDFILE="$DATA_DIR/desktop.pid"
 MAC_APP="$ROOT/大帅网关.app"
+
+mkdir -p "$DATA_DIR"
+if [ ! -f "$DATA_DIR/.portable-data-migrated" ]; then
+  LEGACY_DATA=""
+  for candidate in "$OLD_DATA" "$ROOT"/../大帅网关-mac-*/data; do
+    if [ -d "$candidate" ] && { [ -f "$candidate/config.json" ] || [ -f "$candidate/providers.json" ] || [ -f "$candidate/session.json" ]; }; then
+      LEGACY_DATA="$candidate"
+      break
+    fi
+  done
+  if [ -n "$LEGACY_DATA" ]; then
+    BACKUP="$HOME/Library/Application Support/DashuaiGateway-portable-backup-$(/bin/date '+%Y%m%d-%H%M%S')"
+    /bin/cp -Rp "$LEGACY_DATA" "$BACKUP"
+    /bin/cp -Rp "$LEGACY_DATA/." "$DATA_DIR/"
+    echo "[大帅网关] 已迁移旧版数据到：$DATA_DIR"
+    echo "[大帅网关] 迁移前备份：$BACKUP"
+    : >"$DATA_DIR/.portable-data-migrated"
+  fi
+fi
 
 port_alive() {
   P=8010
-  if [ -f "$ROOT/data/config.json" ] && [ -x "$VENV/bin/python" ]; then
-    P="$("$VENV/bin/python" -c "import json;print(json.load(open(r'''$ROOT/data/config.json''',encoding='utf-8-sig')).get('port') or 8010)" 2>/dev/null || echo 8010)"
+  if [ -f "$DATA_DIR/config.json" ] && [ -x "$VENV/bin/python" ]; then
+    P="$("$VENV/bin/python" -c "import json;print(json.load(open(r'''$DATA_DIR/config.json''',encoding='utf-8-sig')).get('port') or 8010)" 2>/dev/null || echo 8010)"
   fi
   /usr/bin/curl -fsS --max-time 1 "http://127.0.0.1:${P}/api/overview" >/dev/null 2>&1
 }
@@ -120,7 +141,7 @@ if [ ! -x "$VENV/bin/python" ]; then
   echo "[大帅网关] 环境准备完成。"
 fi
 
-export DASHUAI_DATA_DIR="$ROOT/data"
+export DASHUAI_DATA_DIR="$DATA_DIR"
 export DASHUAI_COMMERCIAL=1
 export DASHUAI_BUNDLE_DIR="$ROOT"
 if [ -n "${PYTHONPATH-}" ]; then
@@ -129,10 +150,10 @@ else
   export PYTHONPATH="$APP"
 fi
 
-mkdir -p "$ROOT/data"
+mkdir -p "$DATA_DIR"
 for name in config providers routers; do
-  if [ ! -f "$ROOT/data/${name}.json" ] && [ -f "$APP/data/${name}.example.json" ]; then
-    cp "$APP/data/${name}.example.json" "$ROOT/data/${name}.json"
+  if [ ! -f "$DATA_DIR/${name}.json" ] && [ -f "$APP/data/${name}.example.json" ]; then
+    cp "$APP/data/${name}.example.json" "$DATA_DIR/${name}.json"
   fi
 done
 

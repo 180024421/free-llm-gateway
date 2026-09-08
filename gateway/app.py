@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+import base64
+import io
+import json
+import platform
+import sys
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -7,7 +12,7 @@ from typing import Any, Optional
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import JSONResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import __product__, __product_en__, __version__
@@ -22,6 +27,7 @@ from .config import (
     load_routers,
     mask_secret,
     overview_payload,
+    provider_is_ready,
     reload_all,
     save_config,
     save_providers,
@@ -39,6 +45,7 @@ from .proxy import (
     is_fast_route,
     is_novel_route,
     is_snappy_route,
+    payload_has_usable_text,
     prepare_body_for_upstream,
     probe_provider,
     remount_route_for_tools,
@@ -47,7 +54,7 @@ from .proxy import (
     usage_for_ui,
     usage_summary,
 )
-from .router import list_upstream_models, resolve_candidates
+from .router import adaptive_route_for_request, list_upstream_models, resolve_candidates
 from .channel_store import apply_to_state
 from .chat_dispatch import race_first_success
 from .concurrency import provider_limit_from_config, provider_slot
@@ -70,6 +77,7 @@ from .ops import (
 )
 from .workbuddy import diagnose_workbuddy, sync_workbuddy, workbuddy_status
 from .license import (
+    SENSITIVE_SCOPES,
     cache_entitlement,
     clear_session,
     entitlement_snapshot,
@@ -119,7 +127,7 @@ def _assistant_text(raw: Any) -> str:
 
 
 def _usable_chat_payload(raw: Any) -> bool:
-    return bool(_assistant_text(raw))
+    return payload_has_usable_text(raw)
 
 
 @asynccontextmanager
@@ -199,6 +207,10 @@ async def lifespan(_: FastAPI):
         stop_usage_writer(flush=True)
     except Exception:
         pass
+    try:
+        await flush_pending_usage()
+    except Exception:
+        pass
     await aclose_http_client()
 
 
@@ -225,6 +237,7 @@ async def require_localhost_for_ops(request: Request, call_next):
         or p.startswith("/api/call-log")
         or p.startswith("/api/bootstrap")
         or p.startswith("/api/health-board")
+        or p.startswith("/api/android/pairing")
         or p.startswith("/api/ops/")
         or p.startswith("/api/integrations/workbuddy/diagnose")
     )
@@ -412,6 +425,86 @@ def api_health_board() -> dict[str, Any]:
     }
 
 
+@app.get("/api/diagnostics/connect")
+def api_connect_diagnostics(_: None = Depends(_auth)) -> dict[str, Any]:
+    """Small, stable client-facing readiness check with no upstream request."""
+    cfg = load_config()
+    providers = load_providers()
+    ready = [p for p in providers if provider_is_ready(p)]
+    routes = load_routers()
+    license_snap = entitlement_snapshot()
+    license_ok = not license_required(cfg) or bool(license_snap.get("valid"))
+    checks = {
+        "gateway": {"ok": True, "code": "GATEWAY_OK", "message": "网关服务正常"},
+        "local_key": {"ok": True, "code": "LOCAL_KEY_OK", "message": "本地 API Key 正确"},
+        "license": {
+            "ok": license_ok,
+            "code": "LICENSE_OK" if license_ok else "LICENSE_REQUIRED",
+            "message": "授权有效" if license_ok else str(license_snap.get("message") or "请登录并激活权益"),
+        },
+        "upstream": {
+            "ok": bool(ready),
+            "code": "UPSTREAM_READY" if ready else "NO_UPSTREAM",
+            "message": f"已有 {len(ready)} 个可用渠道" if ready else "尚未配置可用上游 API Key",
+        },
+        "routes": {
+            "ok": bool(routes),
+            "code": "ROUTES_READY" if routes else "NO_ROUTES",
+            "message": f"已有 {len(routes)} 个用途路由" if routes else "尚未生成用途路由",
+        },
+    }
+    ok = all(item["ok"] for item in checks.values())
+    return {
+        "ok": ok,
+        "code": "READY" if ok else "NOT_READY",
+        "checks": checks,
+        "fix_url": "/ui/",
+        "version": __version__,
+    }
+
+
+def _android_pairing_payload() -> dict[str, Any]:
+    boot = bootstrap_for_ui()
+    return {
+        "type": "dashuai-gateway-pairing",
+        "version": 1,
+        "gatewayVersion": __version__,
+        "baseUrl": boot.get("lan_openai_base") or "",
+        "apiKey": load_config().get("local_api_key") or "",
+    }
+
+
+def _android_pairing_code() -> str:
+    raw = json.dumps(_android_pairing_payload(), ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    token = base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+    return f"dashuai://pair?data={token}"
+
+
+@app.get("/api/android/pairing")
+def api_android_pairing(_: None = Depends(_auth)) -> dict[str, Any]:
+    payload = _android_pairing_payload()
+    return {
+        "ok": bool(payload["baseUrl"]),
+        "pairing_code": _android_pairing_code(),
+        "base_url": payload["baseUrl"],
+        "bind_localhost": bool(bootstrap_for_ui().get("bind_localhost")),
+        "message": "重启网关后手机才能连接" if bootstrap_for_ui().get("bind_localhost") else "手机与电脑连接同一 WiFi 后扫码",
+    }
+
+
+@app.get("/api/android/pairing.svg")
+def api_android_pairing_svg(_: None = Depends(_auth)) -> Response:
+    try:
+        import qrcode
+        import qrcode.image.svg
+    except ImportError as exc:
+        raise HTTPException(status_code=503, detail="缺少二维码组件，请重新安装依赖") from exc
+    image = qrcode.make(_android_pairing_code(), image_factory=qrcode.image.svg.SvgPathImage)
+    output = io.BytesIO()
+    image.save(output)
+    return Response(content=output.getvalue(), media_type="image/svg+xml")
+
+
 @app.get("/api/ops/autostart")
 def api_autostart_get() -> dict[str, Any]:
     return autostart_status()
@@ -469,20 +562,54 @@ async def api_update_check() -> dict[str, Any]:
     changelog = ""
     force_update = False
     maintenance = False
+    machine = platform.machine().lower()
+    is_mac = sys.platform == "darwin"
+    is_mac_arm = machine in {"arm64", "aarch64"}
     # Prefer dedicated app-update catalog; fall back to bootstrap meta.
     try:
         data = await jane_request("GET", "/app-update/dashuai-gateway", timeout=8.0)
         if isinstance(data, dict):
             latest = str(data.get("versionName") or data.get("version_name") or latest)
-            download_url = str(data.get("desktopUrl") or data.get("desktop_url") or "")
-            download_sha256 = str(data.get("downloadSha256") or data.get("download_sha256") or "")
+            if is_mac:
+                download_url = str(
+                    data.get("macArm64Url" if is_mac_arm else "macX64Url")
+                    or data.get("mac_arm64_url" if is_mac_arm else "mac_x64_url")
+                    or data.get("macUrl")
+                    or data.get("mac_url")
+                    or ""
+                )
+                download_sha256 = str(
+                    data.get("macArm64Sha256" if is_mac_arm else "macX64Sha256")
+                    or data.get("mac_arm64_sha256" if is_mac_arm else "mac_x64_sha256")
+                    or data.get("macSha256")
+                    or ""
+                )
+            else:
+                download_url = str(
+                    data.get("windowsUrl")
+                    or data.get("windows_url")
+                    or data.get("desktopUrl")
+                    or data.get("desktop_url")
+                    or ""
+                )
+                download_sha256 = str(
+                    data.get("windowsSha256")
+                    or data.get("windows_sha256")
+                    or data.get("downloadSha256")
+                    or data.get("download_sha256")
+                    or ""
+                )
             changelog = str(data.get("changelog") or "")
             force_update = bool(data.get("forceUpdate") or data.get("force_update"))
     except Exception:
         meta = await api_remote_bootstrap()
         latest = str(meta.get("latestVersion") or local)
-        download_url = str(meta.get("downloadUrl") or "")
-        download_sha256 = str(meta.get("downloadSha256") or "")
+        if is_mac:
+            download_url = str(meta.get("macArm64Url" if is_mac_arm else "macX64Url") or meta.get("macUrl") or "")
+            download_sha256 = str(meta.get("macArm64Sha256" if is_mac_arm else "macX64Sha256") or meta.get("macSha256") or "")
+        else:
+            download_url = str(meta.get("windowsUrl") or meta.get("downloadUrl") or "")
+            download_sha256 = str(meta.get("windowsSha256") or meta.get("downloadSha256") or "")
         changelog = str(meta.get("changelog") or "")
         force_update = bool(meta.get("forceUpdate") or meta.get("force_update"))
         maintenance = bool(meta.get("maintenanceEnabled"))
@@ -490,9 +617,9 @@ async def api_update_check() -> dict[str, Any]:
         try:
             meta = await api_remote_bootstrap()
             maintenance = bool(meta.get("maintenanceEnabled"))
-            if not download_url:
+            if not download_url and not is_mac:
                 download_url = str(meta.get("downloadUrl") or "")
-            if not download_sha256:
+            if not download_sha256 and not is_mac:
                 download_sha256 = str(meta.get("downloadSha256") or "")
             if not changelog:
                 changelog = str(meta.get("changelog") or "")
@@ -509,6 +636,8 @@ async def api_update_check() -> dict[str, Any]:
         "changelog": changelog,
         "force_update": force_update,
         "maintenance": maintenance,
+        "platform": "macos" if sys.platform == "darwin" else ("windows" if sys.platform == "win32" else sys.platform),
+        "architecture": platform.machine().lower(),
     }
 
 
@@ -647,6 +776,7 @@ async def put_config(request: Request, _: None = Depends(_auth)) -> dict[str, An
         "expose_upstream_model",
         "auto_sync_workbuddy",
         "routes_manual_lock",
+        "adaptive_route_intent",
     ):
         if key in body:
             val = body[key]
@@ -665,6 +795,7 @@ async def put_config(request: Request, _: None = Depends(_auth)) -> dict[str, An
                 "license_allow_insecure_http",
                 "novel_fallback_daily",
                 "routes_manual_lock",
+                "adaptive_route_intent",
             }:
                 if isinstance(val, str):
                     val = val.strip().lower() in {"1", "true", "yes", "on"}
@@ -891,7 +1022,12 @@ async def post_workbuddy_integration(
     except Exception:
         pass
     out = sync_workbuddy()
-    synced_key = str(load_config().get("local_api_key") or "").strip()
+    cfg = load_config()
+    cfg["last_client_sync_at"] = time.time()
+    cfg["last_client_sync_ok"] = bool(out.get("ok", True))
+    cfg["last_client_sync_count"] = int(out.get("count") or 0)
+    save_config(cfg)
+    synced_key = str(cfg.get("local_api_key") or "").strip()
     out["api_key_updated"] = api_key_updated
     out["api_key_masked"] = mask_secret(synced_key)
     out["diagnose"] = diagnose_workbuddy()
@@ -979,6 +1115,12 @@ async def _chat_completions_inner(request: Request):
         client_model = remounted
         body = dict(body)
         body["model"] = client_model
+    if bool(cfg.get("adaptive_route_intent", True)):
+        adapted = adaptive_route_for_request(client_model, body, routers)
+        if adapted != client_model:
+            client_model = adapted
+            body = dict(body)
+            body["model"] = client_model
     fast = is_fast_route(client_model)
     daily = is_daily_route(client_model)
     snappy = is_snappy_route(client_model)
@@ -990,7 +1132,7 @@ async def _chat_completions_inner(request: Request):
     body = prepare_body_for_upstream(body, client_model)
     if snappy:
         stall_sec = float(
-            cfg.get("fast_stream_stall_sec")
+            (cfg.get("fast_stream_stall_sec") or 4)
             if fast
             else cfg.get("daily_stream_stall_sec")
             or cfg.get("stream_stall_sec")
@@ -999,7 +1141,7 @@ async def _chat_completions_inner(request: Request):
         timeout = min(
             timeout,
             float(
-                cfg.get("fast_request_timeout_sec")
+                (cfg.get("fast_request_timeout_sec") or 18)
                 if fast
                 else cfg.get("daily_request_timeout_sec")
                 or cfg.get("fast_request_timeout_sec")
@@ -1145,6 +1287,7 @@ async def _chat_completions_inner(request: Request):
             gateway_headers = {
                 "X-Gateway-Provider": _ascii_header(meta.get("provider")),
                 "X-Gateway-Model": _ascii_header(meta.get("upstream_model")),
+                "X-Gateway-Route": _ascii_header(client_model),
                 "X-Request-Id": _ascii_header(meta.get("request_id") or ""),
             }
             if is_free_fallback:
@@ -1240,8 +1383,14 @@ async def _chat_completions_inner(request: Request):
             return hit
 
     # Novel last resort: borrow stable models from 日常 before 502.
-    if novel_route and bool(cfg.get("novel_fallback_daily", True)):
-        fallback = resolve_candidates("日常", providers, routers)
+    if (
+        novel_route
+        and bool(cfg.get("novel_fallback_daily", True))
+        and effective_fallback_policy(client_model, routers, override=fb_override) == "free_pool"
+    ):
+        fallback = resolve_candidates(
+            "日常", providers, routers, fallback_override="free_pool"
+        )
         for provider, upstream_model in fallback[:4]:
             hit = await _attempt(provider, upstream_model)
             if hit is not None:
@@ -1278,9 +1427,10 @@ async def api_license_usage_history(limit: int = 50) -> dict[str, Any]:
     if not sess.get("token"):
         raise HTTPException(status_code=401, detail="未登录")
     data = await jane_request(
-        "GET",
+        "POST",
         f"/gateway/license/usage-history?limit={max(1, min(200, int(limit or 50)))}",
         timeout=12.0,
+        scope=SENSITIVE_SCOPES["gateway-license.usage-history"],
     )
     if isinstance(data, list):
         items = data
@@ -1337,6 +1487,14 @@ async def api_remote_bootstrap() -> dict[str, Any]:
         "latestVersion": data.get("latestVersion") or data.get("latest_version") or __version__,
         "downloadUrl": data.get("downloadUrl") or data.get("download_url") or "",
         "downloadSha256": data.get("downloadSha256") or data.get("download_sha256") or "",
+        "windowsUrl": data.get("windowsUrl") or data.get("windows_url") or data.get("desktopUrl") or "",
+        "windowsSha256": data.get("windowsSha256") or data.get("windows_sha256") or "",
+        "macUrl": data.get("macUrl") or data.get("mac_url") or "",
+        "macSha256": data.get("macSha256") or data.get("mac_sha256") or "",
+        "macArm64Url": data.get("macArm64Url") or data.get("mac_arm64_url") or "",
+        "macArm64Sha256": data.get("macArm64Sha256") or data.get("mac_arm64_sha256") or "",
+        "macX64Url": data.get("macX64Url") or data.get("mac_x64_url") or "",
+        "macX64Sha256": data.get("macX64Sha256") or data.get("mac_x64_sha256") or "",
         "changelog": data.get("changelog") or "",
         "forceUpdate": bool(data.get("forceUpdate") or data.get("force_update")),
         "projectId": data.get("projectId") or data.get("project_id") or cfg.get("license_project_id"),
@@ -1360,7 +1518,12 @@ async def api_account_register(request: Request) -> dict[str, Any]:
         "confirmPassword": (body or {}).get("confirmPassword") or (body or {}).get("password"),
         "typed": 0,
     }
-    await jane_request("POST", "/user/register", json_body=payload)
+    await jane_request(
+        "POST",
+        "/user/register",
+        json_body=payload,
+        scope=SENSITIVE_SCOPES["user.register"],
+    )
     return {"ok": True}
 
 
@@ -1375,6 +1538,7 @@ async def api_account_login(request: Request) -> dict[str, Any]:
             "password": (body or {}).get("password"),
             "typed": 0,
         },
+        scope=SENSITIVE_SCOPES["user.login"],
     )
     if not isinstance(data, dict) or not data.get("token"):
         raise HTTPException(status_code=401, detail="登录失败")
@@ -1385,7 +1549,12 @@ async def api_account_login(request: Request) -> dict[str, Any]:
     sess["username"] = data.get("username")
     save_session(sess)
     try:
-        status = await jane_request("GET", "/gateway/license/status", token=str(data.get("token")))
+        status = await jane_request(
+            "POST",
+            "/gateway/license/status",
+            token=str(data.get("token")),
+            scope=SENSITIVE_SCOPES["gateway-license.status"],
+        )
         if isinstance(status, dict):
             cache_entitlement(status)
     except Exception:
@@ -1410,7 +1579,12 @@ async def api_license_redeem(request: Request) -> dict[str, Any]:
     code = str((body or {}).get("cardCode") or (body or {}).get("card_code") or "").strip()
     if not code:
         raise HTTPException(status_code=400, detail="请输入卡密")
-    data = await jane_request("POST", "/gateway/license/redeem", json_body={"cardCode": code})
+    data = await jane_request(
+        "POST",
+        "/gateway/license/redeem",
+        json_body={"cardCode": code},
+        scope=SENSITIVE_SCOPES["gateway-license.redeem"],
+    )
     if isinstance(data, dict):
         cache_entitlement(data)
     return {"ok": True, "license": entitlement_snapshot()}
@@ -1476,7 +1650,12 @@ async def api_shop_order_redeem(order_no: str) -> dict[str, Any]:
     card = data.get("cardCode") or data.get("card_code")
     if status != "PAID" or not card:
         return {"ok": False, "paid": status == "PAID", "order": data, "message": "订单未支付或尚未发卡"}
-    redeemed = await jane_request("POST", "/gateway/license/redeem", json_body={"cardCode": card})
+    redeemed = await jane_request(
+        "POST",
+        "/gateway/license/redeem",
+        json_body={"cardCode": card},
+        scope=SENSITIVE_SCOPES["gateway-license.redeem"],
+    )
     if isinstance(redeemed, dict):
         cache_entitlement(redeemed)
     return {"ok": True, "cardCode": card, "license": entitlement_snapshot()}

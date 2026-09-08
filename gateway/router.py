@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+import re
 from typing import Any
 
 from .meta import apply_alias
@@ -192,6 +193,108 @@ def _route_candidates(model: str, routers: dict[str, Any]) -> list[str]:
     return [strip_route_display(model)]
 
 
+def adaptive_route_for_request(model: str, body: dict[str, Any], routers: dict[str, Any]) -> str:
+    """Route ordinary "daily/auto" requests by intent without overriding explicit choices."""
+    from .meta import strip_route_display
+
+    raw = strip_route_display(model or "").strip()
+    if raw.lower() not in {"daily", "auto"} and raw != "日常":
+        return raw
+
+    messages = body.get("messages") if isinstance(body, dict) else []
+    text_parts: list[str] = []
+    has_image = False
+    if isinstance(messages, list):
+        # The current user turn expresses intent. Assistant/tool history often
+        # contains code or huge outputs that would otherwise misroute "谢谢".
+        user_messages = [
+            message
+            for message in messages
+            if isinstance(message, dict) and str(message.get("role") or "").lower() == "user"
+        ]
+        for message in user_messages[-1:]:
+            if not isinstance(message, dict):
+                continue
+            content = message.get("content")
+            if isinstance(content, str):
+                text_parts.append(content)
+            elif isinstance(content, list):
+                for part in content:
+                    if not isinstance(part, dict):
+                        continue
+                    if part.get("type") in {"image_url", "input_image", "image"}:
+                        has_image = True
+                    if isinstance(part.get("text"), str):
+                        text_parts.append(part["text"])
+    text = "\n".join(text_parts)
+    low = text.lower()
+
+    targets: list[str] = []
+    if isinstance(body, dict) and body.get("tools"):
+        targets.append("Agent")
+    if has_image:
+        targets.append("识图")
+    if len(text) >= 12_000:
+        targets.append("长文")
+    if re.search(r"翻译成|译成|translate\s+(this|the|to)|translation", low):
+        targets.append("翻译")
+    if len(text) >= 1_000 and re.search(r"总结|概括|摘要|提炼|summari[sz]e", low):
+        targets.append("总结")
+    if re.search(
+        r"```|traceback|stack trace|编译错误|报错|调试|debug|重构|实现.{0,8}(函数|接口|功能)|"
+        r"\b(class|function|typescript|javascript|python|java|kotlin|golang|rust)\b",
+        low,
+    ):
+        targets.append("代码")
+    if re.search(r"严谨分析|深入分析|根因分析|方案对比|架构设计|证明|推导|逐步推理|step by step", low):
+        targets.append("推理")
+
+    for target in targets:
+        if _lookup_route(target, routers) is not None:
+            return target
+    return raw
+
+
+def adaptive_candidate_score(
+    route: str,
+    upstream_model: str,
+    health: Any,
+    candidate_rank: int,
+    provider_weight: float = 1.0,
+) -> float:
+    """Blend route intent, live reliability and TTFT while retaining curated order."""
+    from .route_builder import model_accuracy_tier
+
+    raw = str(route or "").strip().lower()
+    if raw in {"快速", "fast"}:
+        rel_w, speed_w, quality_w = 0.25, 0.65, 0.10
+    elif raw in {"复杂", "complex", "推理", "reasoning", "代码", "code", "agent", "长文", "longctx", "小说", "novel"}:
+        rel_w, speed_w, quality_w = 0.35, 0.15, 0.50
+    else:
+        rel_w, speed_w, quality_w = 0.35, 0.40, 0.25
+
+    successes = max(0, int(getattr(health, "successes", 0) or 0))
+    failures = max(0, int(getattr(health, "failures", 0) or 0))
+    samples = successes + failures
+    prior = max(0.25, 1.0 - max(0, candidate_rank) * 0.07)
+    if samples <= 0:
+        return prior
+
+    reliability = (successes + 3.0) / (samples + 4.0)
+    latency = getattr(health, "last_ttft_ms", None)
+    if latency is None and not hasattr(health, "last_ttft_ms"):
+        # Compatibility for tests/custom health objects from older extensions.
+        latency = getattr(health, "last_latency_ms", None)
+    speed = 0.45 if latency is None else max(0.05, 1.0 - min(float(latency), 15_000.0) / 15_000.0)
+    quality = model_accuracy_tier(upstream_model)
+    observed = reliability * rel_w + speed * speed_w + quality * quality_w
+    if quality_w >= 0.5 and quality < 0.65:
+        observed *= 0.4
+    confidence = min(0.80, samples / 10.0)
+    weight_bonus = max(-0.04, min(0.04, (float(provider_weight) - 5.0) / 125.0))
+    return prior * (1.0 - confidence) + observed * confidence + weight_bonus
+
+
 def resolve_candidates(
     model: str,
     providers: list[dict[str, Any]],
@@ -243,6 +346,7 @@ def resolve_candidates(
             return False
         return True
 
+    wanted_rank = {str(m).lower(): i for i, m in enumerate(wanted)}
     pairs: list[tuple[dict[str, Any], str, float, float, int]] = []
     for upstream_model in wanted:
         for p in _enabled_providers(providers):
@@ -253,6 +357,9 @@ def resolve_candidates(
                 continue
             canon = next((m for m in models if str(m).lower() == upstream_model.lower()), upstream_model)
             h = STATE.get(str(p.get("name") or "?"), canon)
+            tier_rank = quota_tier_rank(p)
+            if tier_rank == 2 and not allow_spillover:
+                continue
             weight = float(p.get("weight") or 1)
             try:
                 from .commercial import provider_region_boost
@@ -260,17 +367,18 @@ def resolve_candidates(
                 weight *= provider_region_boost(str(p.get("base_url") or ""), str(p.get("name") or "?"))
             except Exception:
                 pass
-            score = h.score(weight)
             # Prefer lower observed latency when scores are close.
-            lat = float(h.last_latency_ms or 99999)
+            lat = float(h.last_ttft_ms or 99999)
             # Skip models in cooldown so 429/404 losers don't burn every request.
             if now < h.open_until:
                 continue
-            pairs.append((p, canon, score, lat, quota_tier_rank(p)))
+            rank = wanted_rank.get(str(canon).lower(), 999)
+            score = adaptive_candidate_score(model, canon, h, rank, weight)
+            pairs.append((p, canon, score, lat, tier_rank))
 
-    wanted_rank = {str(m).lower(): i for i, m in enumerate(wanted)}
-    # Prefer daily/signup providers before free-pool; within a tier keep route candidate order.
-    pairs.sort(key=lambda t: (t[4], wanted_rank.get(str(t[1]).lower(), 999), -t[2], t[3]))
+    # Keep quota tier boundaries, then adapt live within each tier. Curated
+    # candidate order remains the cold-start prior until enough samples exist.
+    pairs.sort(key=lambda t: (t[4], -t[2], wanted_rank.get(str(t[1]).lower(), 999), t[3]))
     seen: set[tuple[str, str]] = set()
     ordered: list[tuple[dict[str, Any], str]] = []
     for p, m, *_rest in pairs:
@@ -299,7 +407,7 @@ def resolve_candidates(
                 ordered.append((p, m))
 
     # 没有可用的日额度/赠送渠道时，立刻切免费池（「仅大杯」路由跳过）。
-    if allow_spillover and not any(quota_tier_rank(p) < 2 for p, _ in ordered):
+    if allow_spillover:
         append_free_pool_spillover()
 
     # Last resort: if every candidate is cooling down, retry cooled list by route order.
@@ -309,6 +417,8 @@ def resolve_candidates(
             for p in _enabled_providers(providers):
                 pname = str(p.get("name") or "?")
                 if provider_blocked(pname):
+                    continue
+                if quota_tier_rank(p) == 2 and not allow_spillover:
                     continue
                 models = _active_models(p)
                 if not model_in(models, upstream_model):

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+import asyncio
+
 from gateway.proxy import (
     SseModelRewriter,
     is_fast_route,
@@ -7,7 +10,7 @@ from gateway.proxy import (
     prepare_body_for_upstream,
     rewrite_model_field,
 )
-from gateway.router import resolve_candidates
+from gateway.router import adaptive_candidate_score, adaptive_route_for_request, resolve_candidates
 
 
 def test_remount_vision_with_ardot_tools_to_agent():
@@ -21,6 +24,66 @@ def test_remount_vision_with_ardot_tools_to_agent():
     assert remount_route_for_tools("vision", body) == "Agent"
     assert remount_route_for_tools("日常", {"tools": [{"function": {"name": "shell"}}]}) == "日常"
     assert remount_route_for_tools("识图", {"messages": []}) == "识图"
+
+
+def test_adaptive_daily_route_detects_user_intent():
+    routers = {
+        "日常": {"candidates": ["m1"]},
+        "代码": {"candidates": ["coder"]},
+        "翻译": {"candidates": ["translator"]},
+        "推理": {"candidates": ["reasoner"]},
+        "长文": {"candidates": ["long"]},
+    }
+    assert adaptive_route_for_request(
+        "日常",
+        {"messages": [{"role": "user", "content": "请调试这段 Python traceback 并修复代码"}]},
+        routers,
+    ) == "代码"
+    assert adaptive_route_for_request(
+        "daily",
+        {"messages": [{"role": "user", "content": "请严谨分析并逐步推理这个方案"}]},
+        routers,
+    ) == "推理"
+    assert adaptive_route_for_request("快速", {"messages": []}, routers) == "快速"
+
+
+def test_adaptive_route_uses_current_user_turn_not_assistant_history():
+    routers = {
+        "日常": {"candidates": ["m1"]},
+        "代码": {"candidates": ["coder"]},
+    }
+    body = {
+        "messages": [
+            {"role": "assistant", "content": "```python\nraise RuntimeError('traceback')\n```"},
+            {"role": "user", "content": "谢谢"},
+        ]
+    }
+    assert adaptive_route_for_request("日常", body, routers) == "日常"
+
+
+def test_tool_only_payload_is_usable():
+    from gateway.app import _usable_chat_payload
+
+    raw = {
+        "choices": [
+            {
+                "message": {
+                    "content": None,
+                    "tool_calls": [{"id": "call-1", "type": "function"}],
+                }
+            }
+        ]
+    }
+    assert _usable_chat_payload(raw)
+
+
+def test_adaptive_fast_score_learns_low_ttft_without_ignoring_cold_start_order():
+    cold = SimpleNamespace(successes=0, failures=0, last_latency_ms=None)
+    assert adaptive_candidate_score("快速", "m1", cold, 0) > adaptive_candidate_score("快速", "m2", cold, 1)
+
+    slow = SimpleNamespace(successes=9, failures=1, last_latency_ms=9000)
+    fast = SimpleNamespace(successes=9, failures=1, last_latency_ms=500)
+    assert adaptive_candidate_score("快速", "m2", fast, 1) > adaptive_candidate_score("快速", "m1", slow, 0)
 
 
 def test_rewrite_model_field():
@@ -93,6 +156,104 @@ def test_sse_utf8_split_mid_chinese_does_not_corrupt():
     assert '"model": "\\u8bc6\\u56fe"' in text or '"model":"\\u8bc6\\u56fe"' in text or '"model": "识图"' in text or '"model":"识图"' in text
 
 
+def test_stream_health_updates_only_after_clean_eof(monkeypatch):
+    from gateway import proxy as proxy_mod
+    from gateway.state import RuntimeState
+
+    event = b'data: {"choices":[{"delta":{"tool_calls":[{"id":"call-1"}]},"finish_reason":"tool_calls"}]}\n\n'
+
+    class Response:
+        status_code = 200
+
+        async def aiter_bytes(self):
+            yield event
+            yield b"data: [DONE]\n\n"
+
+        async def aclose(self):
+            return None
+
+    class Client:
+        def build_request(self, *args, **kwargs):
+            return object()
+
+        async def send(self, *args, **kwargs):
+            return Response()
+
+    state = RuntimeState()
+    monkeypatch.setattr(proxy_mod, "STATE", state)
+    monkeypatch.setattr(proxy_mod, "get_http_client", lambda timeout: Client())
+    monkeypatch.setattr(proxy_mod, "_append_usage", lambda row: None)
+
+    async def run():
+        _resp, stream_iter, _meta = await proxy_mod.forward_chat(
+            provider={"name": "A", "base_url": "https://example.test/v1", "api_key": "sk-x"},
+            upstream_model="tool-model",
+            client_model="Agent",
+            body={"messages": [{"role": "user", "content": "use tool"}], "tools": [{"type": "function"}]},
+            timeout_sec=5,
+            stream=True,
+            stall_sec=1,
+        )
+        assert stream_iter is not None
+        assert state.get("A", "tool-model").successes == 0
+        _ = [chunk async for chunk in stream_iter]
+
+    asyncio.run(run())
+    health = state.get("A", "tool-model")
+    assert health.successes == 1
+    assert health.last_ttft_ms is not None
+
+
+def test_stream_mid_stall_marks_channel_failed(monkeypatch):
+    from gateway import proxy as proxy_mod
+    from gateway.state import RuntimeState
+
+    event = b'data: {"choices":[{"delta":{"content":"hello"},"finish_reason":null}]}\n\n'
+
+    class Response:
+        status_code = 200
+
+        async def aiter_bytes(self):
+            yield event
+            await asyncio.sleep(5)
+
+        async def aclose(self):
+            return None
+
+    class Client:
+        def build_request(self, *args, **kwargs):
+            return object()
+
+        async def send(self, *args, **kwargs):
+            return Response()
+
+    state = RuntimeState()
+    usage_rows = []
+    monkeypatch.setattr(proxy_mod, "STATE", state)
+    monkeypatch.setattr(proxy_mod, "get_http_client", lambda timeout: Client())
+    monkeypatch.setattr(proxy_mod, "_append_usage", usage_rows.append)
+
+    async def run():
+        _resp, stream_iter, _meta = await proxy_mod.forward_chat(
+            provider={"name": "A", "base_url": "https://example.test/v1", "api_key": "sk-x"},
+            upstream_model="unstable",
+            client_model="日常",
+            body={"messages": [{"role": "user", "content": "hello"}]},
+            timeout_sec=5,
+            stream=True,
+            stall_sec=0.05,
+        )
+        assert stream_iter is not None
+        _ = [chunk async for chunk in stream_iter]
+
+    asyncio.run(run())
+    health = state.get("A", "unstable")
+    assert health.successes == 0
+    assert health.failures == 1
+    assert usage_rows[-1]["ok"] is False
+    assert "stall" in usage_rows[-1]["error"]
+
+
 def test_resolve_candidates_prefers_ready_provider():
     providers = [
         {
@@ -139,6 +300,14 @@ def test_fast_route_low_reasoning():
     )
     assert body["reasoning_effort"] == "low"
     assert body["max_tokens"] == 6144
+
+
+def test_256k_uses_long_context_timing_and_token_cap():
+    from gateway.proxy import _route_max_tokens, is_novel_route
+
+    assert not is_fast_route("256k")
+    assert is_novel_route("256k")
+    assert _route_max_tokens("256k") == 32768
 
 
 def test_novel_and_code_routes():

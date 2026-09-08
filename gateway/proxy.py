@@ -86,6 +86,10 @@ def _finalize_usage_row(row: dict[str, Any]) -> dict[str, Any]:
 
 
 def _append_usage(row: dict[str, Any]) -> None:
+    # Health probes are internal maintenance traffic. They must update channel
+    # health, but must never appear in customer usage or consume license quota.
+    if str(row.get("client_model") or "").strip().lower() == "probe":
+        return
     row = _finalize_usage_row(row)
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     try:
@@ -639,9 +643,8 @@ def is_fast_route(client_model: str) -> bool:
 
     raw = strip_route_display(client_model or "").strip()
     m = raw.lower()
-    return raw in {"快速", "fast", "256k", "翻译", "总结"} or m in {
+    return raw in {"快速", "fast", "翻译", "总结"} or m in {
         "fast",
-        "256k",
         "translate",
         "summarize",
         "summary",
@@ -674,7 +677,7 @@ def is_novel_route(client_model: str) -> bool:
 
     raw = strip_route_display(client_model or "").strip()
     m = raw.lower()
-    return raw in {"小说", "长文"} or m in {"novel", "longctx", "long", "1m"}
+    return raw in {"小说", "长文"} or m in {"novel", "longctx", "long", "256k", "1m"}
 
 
 def is_coding_route(client_model: str) -> bool:
@@ -746,7 +749,7 @@ def prefer_low_reasoning(body: dict[str, Any], client_model: str) -> dict[str, A
 def _route_max_tokens(client_model: str) -> int:
     raw = (client_model or "").strip()
     low = raw.lower()
-    if raw in {"快速", "fast", "256k"} or low in {"fast", "256k"}:
+    if raw in {"快速", "fast"} or low == "fast":
         return 6144
     if raw in {"识图", "vision"} or low == "vision":
         return 4096
@@ -754,7 +757,7 @@ def _route_max_tokens(client_model: str) -> int:
         return 32768
     if is_coding_route(client_model):
         return 16384
-    if raw in {"日常", "daily", "1m"} or low in {"daily", "1m"}:
+    if raw in {"日常", "daily"} or low == "daily":
         return 12288
     return 8192
 
@@ -940,6 +943,7 @@ def _note_upstream_fail(
     cooldown_sec: float,
     *,
     provider_meta: dict[str, Any] | None = None,
+    performance: bool = True,
 ) -> None:
     """Mark model fail; on daily/balance exhaustion isolate until refresh so free pool takes over."""
     from .ops import (
@@ -947,11 +951,14 @@ def _note_upstream_fail(
         is_daily_quota_exhausted,
         provider_quota_tier,
     )
-    from .state import STATE
-
     tier = provider_quota_tier(provider_meta)
     exhausted = is_balance_exhausted(error) or is_daily_quota_exhausted(error)
     until = time.time() + max(60.0, float(cooldown_sec))
+    if not performance:
+        STATE.get(provider, model).mark_probe_fail(error, cooldown_sec=cooldown_sec)
+        if exhausted and tier in {"daily", "free"}:
+            STATE.quarantine_provider(provider, error=error, cooldown_sec=cooldown_sec)
+        return
 
     if exhausted and tier == "signup":
         # 千问等：各模型免费额度独立，只封当前模型到次日/到期，其它模型继续打。
@@ -1015,6 +1022,7 @@ async def forward_chat(
     )
     has_tools = bool(payload.get("tools"))
     fast = is_fast_route(client_model)
+    is_probe = str(client_model or "").strip().lower() == "probe"
     cfg_stream = load_config()
     novel_progressive = is_novel_route(client_model) and str(
         cfg_stream.get("novel_stream_mode") or "safe"
@@ -1071,6 +1079,7 @@ async def forward_chat(
             resp = await client.send(req, stream=True)
             latency = (time.perf_counter() - started) * 1000
             meta["latency_ms"] = round(latency, 1)
+            meta["connect_latency_ms"] = round(latency, 1)
             if resp.status_code >= 400:
                 err_body = (await resp.aread()).decode("utf-8", errors="replace")
                 await resp.aclose()
@@ -1081,6 +1090,7 @@ async def forward_chat(
                     f"HTTP {resp.status_code}: {err_body[:300]}",
                     cd,
                     provider_meta=provider,
+                    performance=not is_probe,
                 )
                 meta["error"] = err_body
                 meta["status_code"] = resp.status_code
@@ -1116,9 +1126,9 @@ async def forward_chat(
             pump_task = asyncio.create_task(_pump())
             peek: list[bytes] = []
             usable = False
-            # Fast routes: always peek with short stall so Agent tools don't stick
-            # on a dead upstream. Daily tool turns keep longer / skip hard fail.
-            do_peek = ((not has_tools) or fast) and not buffer_complete
+            # Never commit a 200 stream before its first semantic event. This
+            # keeps fallback possible for tool streams that stall after headers.
+            do_peek = not buffer_complete
             peek_budget = stall_sec if not has_tools else min(stall_sec, 12.0 if fast else stall_sec)
             # Fail dead peers faster; first usable chunk still returns immediately.
             min_wait = 1.0 if is_snappy_route(client_model) else 2.0
@@ -1130,9 +1140,18 @@ async def forward_chat(
                     pump_task.cancel()
                     try:
                         await pump_task
+                    except asyncio.CancelledError:
+                        pass
                     except Exception:
                         pass
-                _note_upstream_fail(name, upstream_model, err, cooldown, provider_meta=provider)
+                _note_upstream_fail(
+                    name,
+                    upstream_model,
+                    err,
+                    cooldown,
+                    provider_meta=provider,
+                    performance=not is_probe,
+                )
                 meta["error"] = err
                 meta["status_code"] = 200
                 _append_usage(
@@ -1169,6 +1188,9 @@ async def forward_chat(
                     piece = rewriter.feed(data)
                     if piece:
                         peek.append(piece)
+                    if rewriter.saw_usable and meta.get("ttft_ms") is None:
+                        ttft = (time.perf_counter() - started) * 1000
+                        meta["ttft_ms"] = round(ttft, 1)
                 tail = rewriter.flush()
                 if tail:
                     peek.append(tail)
@@ -1195,7 +1217,15 @@ async def forward_chat(
                 if b"data: [DONE]" not in joined and b"data:[DONE]" not in joined:
                     peek.append(b"data: [DONE]\n\n")
 
-                STATE.get(name, upstream_model).mark_ok(latency)
+                latency = (time.perf_counter() - started) * 1000
+                meta["latency_ms"] = round(latency, 1)
+                if is_probe:
+                    STATE.get(name, upstream_model).mark_probe_ok()
+                else:
+                    STATE.get(name, upstream_model).mark_ok(
+                        latency,
+                        ttft_ms=float(meta["ttft_ms"]) if meta.get("ttft_ms") is not None else None,
+                    )
                 _remember_ok()
 
                 async def gen_buf() -> AsyncIterator[bytes]:
@@ -1207,6 +1237,8 @@ async def forward_chat(
                             pump_task.cancel()
                             try:
                                 await pump_task
+                            except asyncio.CancelledError:
+                                pass
                             except Exception:
                                 pass
                         await resp.aclose()
@@ -1243,6 +1275,9 @@ async def forward_chat(
                         peek.append(piece)
                     if rewriter.saw_usable:
                         usable = True
+                        ttft = (time.perf_counter() - started) * 1000
+                        meta["ttft_ms"] = round(ttft, 1)
+                        meta["latency_ms"] = round(ttft, 1)
                         break
                     if rewriter.saw_done:
                         usable = rewriter.saw_usable
@@ -1255,22 +1290,52 @@ async def forward_chat(
             else:
                 usable = True
 
-            STATE.get(name, upstream_model).mark_ok(latency)
-            _remember_ok()
-
             async def gen() -> AsyncIterator[bytes]:
-                stream_ok = True
+                stream_ok = False
                 stream_err = ""
                 try:
                     for piece in peek:
                         yield piece
                     while True:
-                        kind, data = await q.get()
+                        try:
+                            kind, data = await asyncio.wait_for(q.get(), timeout=max(1.0, stall_sec))
+                        except asyncio.TimeoutError:
+                            stream_err = f"mid-stream stall ({stall_sec:.0f}s)"
+                            _note_upstream_fail(
+                                name,
+                                upstream_model,
+                                stream_err,
+                                30.0,
+                                provider_meta=provider,
+                                performance=not is_probe,
+                            )
+                            break
                         if kind == "err":
-                            stream_ok = False
                             stream_err = str(data)
+                            _note_upstream_fail(
+                                name,
+                                upstream_model,
+                                f"stream error: {stream_err}",
+                                30.0,
+                                provider_meta=provider,
+                                performance=not is_probe,
+                            )
                             break
                         if kind == "eof":
+                            stream_ok = True
+                            latency = (time.perf_counter() - started) * 1000
+                            if is_probe:
+                                STATE.get(name, upstream_model).mark_probe_ok()
+                            else:
+                                STATE.get(name, upstream_model).mark_ok(
+                                    latency,
+                                    ttft_ms=(
+                                        float(meta["ttft_ms"])
+                                        if meta.get("ttft_ms") is not None
+                                        else None
+                                    ),
+                                )
+                            _remember_ok()
                             break
                         piece = rewriter.feed(data)
                         if piece:
@@ -1283,6 +1348,8 @@ async def forward_chat(
                         pump_task.cancel()
                         try:
                             await pump_task
+                        except asyncio.CancelledError:
+                            pass
                         except Exception:
                             pass
                     await resp.aclose()
@@ -1316,8 +1383,22 @@ async def forward_chat(
                 f"HTTP {resp.status_code}: {err_text}",
                 _fail_cooldown_sec(resp.status_code, resp.text, provider),
                 provider_meta=provider,
+                performance=not is_probe,
             )
             meta["error"] = resp.text
+            _append_usage(
+                {
+                    "ts": time.time(),
+                    "provider": name,
+                    "model": upstream_model,
+                    "client_model": client_model,
+                    "stream": False,
+                    "latency_ms": meta.get("latency_ms"),
+                    "ok": False,
+                    "error": f"HTTP {resp.status_code}",
+                    **_usage_extra(),
+                }
+            )
             return None, None, meta
 
         usage = {}
@@ -1330,13 +1411,34 @@ async def forward_chat(
 
         if isinstance(data, dict) and not payload_has_usable_text(data):
             _note_upstream_fail(
-                name, upstream_model, "empty assistant content", 45.0, provider_meta=provider
+                name,
+                upstream_model,
+                "empty assistant content",
+                45.0,
+                provider_meta=provider,
+                performance=not is_probe,
             )
             meta["error"] = "empty assistant content"
             meta["_raw"] = data
+            _append_usage(
+                {
+                    "ts": time.time(),
+                    "provider": name,
+                    "model": upstream_model,
+                    "client_model": client_model,
+                    "stream": False,
+                    "latency_ms": meta.get("latency_ms"),
+                    "ok": False,
+                    "error": "empty assistant content",
+                    **_usage_extra(),
+                }
+            )
             return None, None, meta
 
-        STATE.get(name, upstream_model).mark_ok(latency)
+        if is_probe:
+            STATE.get(name, upstream_model).mark_probe_ok()
+        else:
+            STATE.get(name, upstream_model).mark_ok(latency)
         _remember_ok()
         _append_usage(
             {
@@ -1360,6 +1462,8 @@ async def forward_chat(
                 pump_task.cancel()
                 try:
                     await pump_task
+                except asyncio.CancelledError:
+                    pass
                 except Exception:
                     pass
             if resp is not None:
@@ -1368,8 +1472,28 @@ async def forward_chat(
             pass
         raise
     except Exception as e:
-        _note_upstream_fail(name, upstream_model, str(e), 45.0, provider_meta=provider)
+        _note_upstream_fail(
+            name,
+            upstream_model,
+            str(e),
+            45.0,
+            provider_meta=provider,
+            performance=not is_probe,
+        )
         meta["error"] = str(e)
+        _append_usage(
+            {
+                "ts": time.time(),
+                "provider": name,
+                "model": upstream_model,
+                "client_model": client_model,
+                "stream": bool(stream),
+                "latency_ms": meta.get("latency_ms"),
+                "ok": False,
+                "error": str(e),
+                **_usage_extra(),
+            }
+        )
         return None, None, meta
 
 

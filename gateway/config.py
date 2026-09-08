@@ -92,7 +92,8 @@ def load_config() -> dict[str, Any]:
                 "local_api_key": "sk-local-change-me",
                 "request_timeout_sec": 120,
                 "max_retries_per_request": 4,
-                "health_probe_interval_sec": 60,
+                "health_probe_interval_sec": 1800,
+                "adaptive_route_intent": True,
             },
         )
     )
@@ -224,6 +225,12 @@ def overview_payload(base_url: str) -> dict[str, Any]:
             "expose_upstream_model": bool(cfg.get("expose_upstream_model", True)),
             "auto_sync_workbuddy": bool(cfg.get("auto_sync_workbuddy", True)),
             "routes_manual_lock": bool(cfg.get("routes_manual_lock", False)),
+            "adaptive_route_intent": bool(cfg.get("adaptive_route_intent", True)),
+            "health_probe_interval_sec": int(cfg.get("health_probe_interval_sec") or 0),
+            "last_client_sync_at": cfg.get("last_client_sync_at"),
+            "last_client_sync_ok": bool(cfg.get("last_client_sync_ok", False)),
+            "last_client_sync_count": int(cfg.get("last_client_sync_count") or 0),
+            "license_api_configured": bool(cfg.get("license_api_base")),
         },
         "last_chat": last,
         "fallback_hits": int(getattr(STATE, "fallback_hits", 0) or 0),

@@ -10,14 +10,31 @@ android {
         applicationId "com.dashuai.gateway"
         minSdk 24
         targetSdk 34
-        versionCode 3
-        versionName "0.3.0"
+        versionCode 502
+        versionName "0.5.2"
     }
 
+    signingConfigs {
+        release {
+            def storePath = System.getenv('DASHUAI_ANDROID_KEYSTORE')
+            def storePass = System.getenv('DASHUAI_ANDROID_STORE_PASSWORD')
+            def keyName = System.getenv('DASHUAI_ANDROID_KEY_ALIAS')
+            def keyPass = System.getenv('DASHUAI_ANDROID_KEY_PASSWORD')
+            if (storePath && storePass && keyName && keyPass) {
+                storeFile file(storePath)
+                storePassword storePass
+                keyAlias keyName
+                keyPassword keyPass
+            }
+        }
+    }
     buildTypes {
         release {
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+            if (System.getenv('DASHUAI_ANDROID_KEYSTORE')) {
+                signingConfig signingConfigs.release
+            }
         }
     }
     compileOptions {
@@ -29,4 +46,5 @@ android {
 dependencies {
     implementation 'androidx.appcompat:appcompat:1.7.0'
     implementation 'com.google.android.material:material:1.12.0'
+    implementation 'com.journeyapps:zxing-android-embedded:4.3.0'
 }

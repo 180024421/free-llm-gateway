@@ -395,8 +395,9 @@ def _merge_license_defaults(data_dir: Path, bundled_example: Path) -> None:
     if not isinstance(cfg, dict) or not isinstance(example, dict):
         return
     changed = False
-    # Fill missing keys from example first.
-    for k in ("license_api_base", "license_project_id", "require_license"):
+    # Fill missing keys from example first. Endpoint values are normalized below,
+    # including legacy files where the key exists but is an empty string.
+    for k in ("license_project_id", "require_license"):
         if k not in cfg and k in example:
             cfg[k] = example[k]
             changed = True
@@ -411,19 +412,14 @@ def _merge_license_defaults(data_dir: Path, bundled_example: Path) -> None:
         cfg.setdefault("license_reserve_tokens", 128)
         cfg.setdefault("encrypt_session", True)
         cfg.setdefault("bill_estimated_usage", True)
-        base = str(cfg.get("license_api_base") or "").strip()
         try:
-            from gateway.commercial import migrate_public_license_base
+            from gateway.commercial import apply_license_endpoint_defaults
 
-            migrated = migrate_public_license_base(base)
-            if migrated and migrated != base:
-                cfg["license_api_base"] = migrated
-                base = migrated
+            if apply_license_endpoint_defaults(cfg):
                 changed = True
-                if "1ph1hf8043323.vicp.fun" in migrated:
-                    cfg["license_allow_insecure_http"] = False
         except Exception:
             pass
+        base = str(cfg.get("license_api_base") or "").strip()
         # 仅在未显式允许明文 HTTP 时，才把公网 http 升到 https
         # 注意：裸 IP 目前只有 HTTP（无证书），绝不能自动升 https，否则升级后授权全挂
         allow_http = bool(cfg.get("license_allow_insecure_http"))
@@ -516,6 +512,10 @@ def _prepare_env(root: Path) -> None:
         else:
             data_dir = Path(sys.executable).resolve().parent / "data"
         data_dir.mkdir(parents=True, exist_ok=True)
+        # 必须在任何 gateway 模块被导入前设置。_merge_license_defaults 会导入
+        # gateway.commercial；若此时仍指向包内 data，gateway.config 会缓存错误目录，
+        # 即使磁盘上的外部 config 已补齐，运行中的登录页仍会认为地址未配置。
+        os.environ["DASHUAI_DATA_DIR"] = str(data_dir)
         for name in ("config", "providers", "routers"):
             target = data_dir / f"{name}.json"
             example = root / "data" / f"{name}.example.json"
@@ -523,7 +523,6 @@ def _prepare_env(root: Path) -> None:
                 target.write_bytes(example.read_bytes())
         _merge_license_defaults(data_dir, root / "data" / "config.example.json")
         _migrate_legacy_data(data_dir)
-        os.environ["DASHUAI_DATA_DIR"] = str(data_dir)
 
 
 def _subprocess_kwargs() -> dict:
@@ -647,8 +646,8 @@ def main() -> None:
         cfg_mod.DATA_DIR = Path(os.environ["DASHUAI_DATA_DIR"])
 
     cfg = cfg_mod.load_config()
-    # Desktop shell always binds localhost; keep external host config for API clients if set
-    bind_host = "127.0.0.1"
+    configured_host = str(cfg.get("host") or "127.0.0.1").strip()
+    bind_host = configured_host if configured_host in {"0.0.0.0", "::"} else "127.0.0.1"
     port = int(cfg.get("port") or 8010)
     ui = f"http://127.0.0.1:{port}/ui/"
 
@@ -691,6 +690,11 @@ def main() -> None:
         sys.exit(1)
 
     _log(f"server ready on {port}")
+
+    if os.environ.get("DASHUAI_SMOKE_TEST", "").strip().lower() in {"1", "true", "yes"}:
+        _log("smoke-test mode ready")
+        time.sleep(float(os.environ.get("DASHUAI_SMOKE_TEST_SECONDS", "30") or 30))
+        return
 
     def _check_workbuddy_drift() -> None:
         try:

@@ -100,7 +100,7 @@
       <label>网关 Base URL（真机请改成电脑局域网 IP）</label>
       <input id="baseUrl" value="http://10.0.2.2:8010/v1" />
       <label>API Key</label>
-      <input id="apiKey" value="sk-local-change-me" />
+      <input id="apiKey" type="password" value="sk-local-change-me" />
       <label>模型 / 路由</label>
       <select id="model">
         <option value="日常">日常</option>
@@ -115,9 +115,13 @@
         <option value="长文">长文</option>
         <option value="Agent">Agent</option>
       </select>
+      <label>电脑控制台连接码（可粘贴）</label>
+      <input id="pairingCode" placeholder="dashuai://pair?data=..." />
       <p id="lanHint" style="font-size:12px;color:var(--muted);margin:8px 0 0"></p>
       <div class="actions">
         <button type="button" id="btnCancel">取消</button>
+        <button type="button" id="btnScan">扫码连接</button>
+        <button type="button" id="btnTest">测试连接</button>
         <button type="button" class="primary" id="btnSave">保存</button>
       </div>
     </div>
@@ -151,6 +155,73 @@
       localStorage.setItem('ds_history', JSON.stringify(state.history.slice(-40)));
     }
 
+    function persistConnection(baseUrl, apiKey) {
+      state.baseUrl = String(baseUrl || '').trim().replace(/\/$/, '');
+      state.apiKey = String(apiKey || '').trim();
+      localStorage.setItem('ds_base', state.baseUrl);
+      localStorage.setItem('ds_key', state.apiKey);
+      document.getElementById('baseUrl').value = state.baseUrl;
+      document.getElementById('apiKey').value = state.apiKey;
+    }
+
+    function parsePairingCode(raw) {
+      const text = String(raw || '').trim();
+      if (!text.startsWith('dashuai://pair?data=')) throw new Error('连接码格式不正确');
+      let token = text.slice('dashuai://pair?data='.length).replace(/-/g, '+').replace(/_/g, '/');
+      while (token.length % 4) token += '=';
+      const binary = atob(token);
+      const bytes = Uint8Array.from(binary, c => c.charCodeAt(0));
+      const data = JSON.parse(new TextDecoder().decode(bytes));
+      if (data.type !== 'dashuai-gateway-pairing' || !data.baseUrl || !data.apiKey) {
+        throw new Error('连接码缺少网关信息');
+      }
+      persistConnection(data.baseUrl, data.apiKey);
+      document.getElementById('lanHint').textContent = '已导入：' + data.baseUrl + '，正在测试连接…';
+      return data;
+    }
+
+    async function testConnection() {
+      const hint = document.getElementById('lanHint');
+      const base = document.getElementById('baseUrl').value.trim().replace(/\/v1\/?$/, '');
+      const key = document.getElementById('apiKey').value.trim();
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 12000);
+      try {
+        const res = await fetch(base + '/api/diagnostics/connect', {
+          headers: { 'Authorization': 'Bearer ' + key },
+          signal: controller.signal,
+        });
+        const body = await res.json().catch(() => ({}));
+        if (res.status === 401) throw new Error('API Key 不正确，请重新扫码');
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        persistConnection(document.getElementById('baseUrl').value, key);
+        if (body.ok) {
+          hint.textContent = '连接正常，可以开始使用';
+          status.textContent = state.model + ' · 在线';
+          return true;
+        }
+        const failed = Object.values(body.checks || {}).filter(x => !x.ok).map(x => x.message);
+        hint.textContent = '网关已连接，但尚未就绪：' + failed.join('；');
+        return false;
+      } catch (e) {
+        hint.textContent = e.name === 'AbortError'
+          ? '连接超时，请确认电脑网关已重启且防火墙允许访问'
+          : '连接失败：' + (e.message || e);
+        return false;
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+
+    window.onDashuaiPairingCode = async function(value) {
+      try {
+        parsePairingCode(value);
+        await testConnection();
+      } catch (e) {
+        document.getElementById('lanHint').textContent = '扫码失败：' + (e.message || e);
+      }
+    };
+
     function restore() {
       if (!state.history.length) {
         add('sys', '你好，我是大帅网关助手。先在设置里确认电脑网关已启动。');
@@ -169,6 +240,8 @@
       const bot = add('bot', '…');
       try {
         const messages = state.history.slice(-12);
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 180000);
         const res = await fetch(state.baseUrl.replace(/\/$/, '') + '/chat/completions', {
           method: 'POST',
           headers: {
@@ -181,8 +254,13 @@
             stream: false,
             temperature: 0.7,
           }),
+          signal: controller.signal,
         });
         const raw = await res.text();
+        clearTimeout(timer);
+        if (res.status === 401) throw new Error('API Key 不正确，请重新扫码或同步');
+        if (res.status === 402) throw new Error('未激活或 Token 不足，请打开电脑控制台');
+        if (res.status === 429) throw new Error('请求过多或上游额度受限，请稍后重试');
         if (!res.ok) throw new Error(res.status + ' ' + raw.slice(0, 200));
         const data = JSON.parse(raw);
         const answer = (data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content) || raw;
@@ -191,7 +269,7 @@
         persistHistory();
         status.textContent = state.model + ' · 在线';
       } catch (e) {
-        bot.textContent = '请求失败：' + e.message + '\n\n真机请把 Base URL 改成 http://你的电脑IP:8010/v1，并保证电脑防火墙放行。';
+        bot.textContent = '请求失败：' + (e.name === 'AbortError' ? '请求超时' : e.message) + '\n\n请点设置中的「测试连接」查看具体原因。';
         status.textContent = '连接失败';
       } finally {
         state.busy = false;
@@ -220,12 +298,26 @@
       sheet.classList.add('show');
     };
     document.getElementById('btnCancel').onclick = () => sheet.classList.remove('show');
+    document.getElementById('btnScan').onclick = () => {
+      if (window.DashuaiNative && window.DashuaiNative.scanPairingCode) {
+        window.DashuaiNative.scanPairingCode();
+      } else {
+        document.getElementById('lanHint').textContent = '当前环境不支持扫码，请粘贴连接码';
+      }
+    };
+    document.getElementById('btnTest').onclick = async () => {
+      const code = document.getElementById('pairingCode').value.trim();
+      if (code) {
+        try { parsePairingCode(code); } catch (e) {
+          document.getElementById('lanHint').textContent = e.message || String(e);
+          return;
+        }
+      }
+      await testConnection();
+    };
     document.getElementById('btnSave').onclick = () => {
-      state.baseUrl = document.getElementById('baseUrl').value.trim();
-      state.apiKey = document.getElementById('apiKey').value.trim();
+      persistConnection(document.getElementById('baseUrl').value, document.getElementById('apiKey').value);
       state.model = document.getElementById('model').value;
-      localStorage.setItem('ds_base', state.baseUrl);
-      localStorage.setItem('ds_key', state.apiKey);
       localStorage.setItem('ds_model', state.model);
       sheet.classList.remove('show');
       status.textContent = state.model + ' · 已保存';
@@ -245,17 +337,23 @@
           if (j.lan_openai_base){
             if (hint) hint.textContent = '检测到局域网网关：' + j.lan_openai_base + '（真机可填此地址）';
             if (state.baseUrl.includes('10.0.2.2') && j.lan_openai_base){
-              document.getElementById('baseUrl').value = j.lan_openai_base;
+              persistConnection(j.lan_openai_base, state.apiKey);
             }
           }
           if (j.local_api_key && state.apiKey === 'sk-local-change-me'){
-            document.getElementById('apiKey').value = j.local_api_key;
+            persistConnection(state.baseUrl, j.local_api_key);
           }
           break;
         }catch(_){}
       }
     }
     tryLanBootstrap();
+    if (!localStorage.getItem('ds_base') || state.baseUrl.includes('10.0.2.2')) {
+      setTimeout(() => {
+        document.getElementById('btnSettings').click();
+        document.getElementById('lanHint').textContent = '首次使用：请扫描电脑控制台「接入参数」中的二维码';
+      }, 250);
+    }
   </script>
 </body>
 </html>

@@ -9,9 +9,42 @@ import gateway.license as lic
 
 
 def test_migrate_public_license_base():
-    assert com.migrate_public_license_base("http://111.229.202.251/api") == com.PUBLIC_LICENSE_API_BASE
+    assert com.migrate_public_license_base("http://111.229.202.251/api") == "http://111.229.202.251/api"
     assert com.migrate_public_license_base("http://111.229.202.251:8687/api") == com.PUBLIC_LICENSE_API_BASE
     assert com.migrate_public_license_base(com.PUBLIC_LICENSE_API_BASE) == com.PUBLIC_LICENSE_API_BASE
+
+
+def test_license_endpoint_defaults_fill_empty_string():
+    cfg = {"license_api_base": ""}
+    assert com.apply_license_endpoint_defaults(cfg) is True
+    assert cfg["license_api_base"] == com.PUBLIC_LICENSE_API_BASE
+    assert cfg["license_api_base_fallback"] == com.PUBLIC_LICENSE_API_BASE_FALLBACK
+
+
+def test_license_endpoint_defaults_fill_missing_key():
+    cfg = {}
+    assert com.apply_license_endpoint_defaults(cfg) is True
+    assert cfg["license_api_base"] == com.PUBLIC_LICENSE_API_BASE
+    assert cfg["license_api_base_fallback"] == com.PUBLIC_LICENSE_API_BASE_FALLBACK
+
+
+def test_license_endpoint_defaults_migrate_old_public_primary():
+    cfg = {"license_api_base": "http://111.229.202.251/api"}
+    assert com.apply_license_endpoint_defaults(cfg) is True
+    assert cfg["license_api_base"] == com.PUBLIC_LICENSE_API_BASE
+    assert cfg["license_api_base_fallback"] == com.PUBLIC_LICENSE_API_BASE_FALLBACK
+
+
+def test_license_endpoint_defaults_preserve_custom_addresses():
+    cfg = {
+        "license_api_base": "https://license.example.com/api",
+        "license_api_base_fallback": "http://10.0.0.8/api",
+    }
+    assert com.apply_license_endpoint_defaults(cfg) is False
+    assert cfg == {
+        "license_api_base": "https://license.example.com/api",
+        "license_api_base_fallback": "http://10.0.0.8/api",
+    }
 
 
 def test_force_https_keeps_ip_http():

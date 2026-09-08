@@ -9,6 +9,7 @@ import json
 import os
 import platform
 import secrets as pysecrets
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -17,6 +18,7 @@ from typing import Any, Optional
 import httpx
 from fastapi import HTTPException
 
+from .crypto_transport import create_envelope, decrypt_response
 from .commercial import (
     bill_estimated_usage,
     force_https_url,
@@ -31,12 +33,23 @@ from .config import DATA_DIR, load_config, save_json, load_json
 SESSION_PATH = DATA_DIR / "session.json"
 _SECRET_PATH_NAME = ".license_hmac"
 _MACHINE_ID_FILE = "machine-id"
-_VICP_FALLBACK_BASE = "http://111.229.202.251/api"
 _refresh_ts = 0.0
 _REFRESH_INTERVAL = 300.0
 
+# Keep protocol scopes in one place so backend naming can be adjusted centrally.
+SENSITIVE_SCOPES = {
+    "user.login": "user.login",
+    "user.register": "user.register",
+    "user.refreshToken": "user.refreshToken",
+    "gateway-license.redeem": "gateway-license.redeem",
+    "gateway-license.status": "gateway-license.status",
+    "gateway-license.usage": "gateway-license.usage",
+    "gateway-license.usage-history": "gateway-license.usage-history",
+}
+
 _reserve_lock = asyncio.Lock()
 _reserved_tokens = 0
+_usage_batch_lock = threading.RLock()
 
 
 def session_path() -> Path:
@@ -246,8 +259,6 @@ def jane_bases(cfg: dict[str, Any] | None = None) -> list[str]:
     fallback_raw = cfg.get("license_api_base_fallback")
     if fallback_raw is not None:
         bases.extend(_collect_base_urls(fallback_raw, cfg))
-    elif bases and any("vicp.fun" in b.lower() for b in bases):
-        bases.append(_VICP_FALLBACK_BASE.rstrip("/"))
     seen: set[str] = set()
     ordered: list[str] = []
     for base in bases:
@@ -328,6 +339,7 @@ async def _jane_http_once(
     params: dict[str, Any] | None = None,
     token: str | None = None,
     timeout: float = 30.0,
+    scope: str | None = None,
 ) -> Any:
     _assert_commercial_https(base)
     url = f"{base.rstrip('/')}{path if path.startswith('/') else '/' + path}"
@@ -336,12 +348,28 @@ async def _jane_http_once(
         headers["X-Device-Fingerprint"] = device_fingerprint()
     except Exception:
         pass
+    request_body = json_body
+    response_key: bytes | None = None
+    request_envelope: dict[str, Any] | None = None
     async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
-        resp = await client.request(method.upper(), url, json=json_body, params=params, headers=headers)
+        if scope:
+            key_response = await client.get(
+                f"{base.rstrip('/')}/crypto/public-key",
+                headers={"Accept": "application/json"},
+            )
+            key_response.raise_for_status()
+            request_envelope, response_key = create_envelope(key_response.json(), scope, json_body or {})
+            request_body = request_envelope
+        resp = await client.request(method.upper(), url, json=request_body, params=params, headers=headers)
     try:
         body = resp.json()
     except Exception:
         body = {"message": resp.text[:500]}
+    if scope:
+        try:
+            body = decrypt_response(body, request_envelope or {}, response_key or b"")
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"授权服务加密响应校验失败: {exc}") from exc
     if resp.status_code >= 400:
         msg = body.get("message") if isinstance(body, dict) else str(body)
         raise HTTPException(status_code=resp.status_code, detail=msg or f"HTTP {resp.status_code}")
@@ -367,6 +395,7 @@ async def try_refresh_session_token() -> bool:
                 json_body=body,
                 token=None,
                 timeout=15.0,
+                scope=SENSITIVE_SCOPES["user.refreshToken"],
             )
             if isinstance(data, dict) and data.get("token"):
                 sess = load_session()
@@ -400,6 +429,7 @@ async def jane_request(
     token: str | None = None,
     timeout: float = 30.0,
     allow_refresh: bool = True,
+    scope: str | None = None,
 ) -> Any:
     bases = jane_bases()
     if not bases:
@@ -418,6 +448,7 @@ async def jane_request(
                 params=params,
                 token=token,
                 timeout=timeout,
+                scope=scope,
             )
         except HTTPException as e:
             if _is_auth_failure(e.status_code):
@@ -436,6 +467,7 @@ async def jane_request(
                             token=token,
                             timeout=timeout,
                             allow_refresh=False,
+                            scope=scope,
                         )
                 invalidate_auth_session("登录已过期，请重新登录")
                 raise HTTPException(status_code=e.status_code, detail="登录已过期，请重新登录")
@@ -457,33 +489,64 @@ async def jane_request(
     raise HTTPException(status_code=503, detail="授权服务不可用")
 
 
+def _pending_usage_tokens(sess: dict[str, Any]) -> int:
+    items: list[Any] = []
+    for key in ("pending_usage", "pending_usage_batches"):
+        value = sess.get(key)
+        if isinstance(value, list):
+            items.extend(value)
+    current = sess.get("pending_usage_current")
+    if isinstance(current, dict):
+        items.extend(current.values())
+    return sum(
+        max(0, int(item.get("tokens") or 0))
+        for item in items
+        if isinstance(item, dict)
+    )
+
+
 def cache_entitlement(status: dict[str, Any]) -> None:
-    sess = load_session()
-    sess["entitlement"] = {
-        "valid": bool(status.get("valid")),
-        "expire_at": status.get("expireAt") or status.get("expire_at"),
-        "token_quota": status.get("tokenQuota") if status.get("tokenQuota") is not None else status.get("token_quota"),
-        "token_used": status.get("tokenUsed") if status.get("tokenUsed") is not None else status.get("token_used"),
-        "token_remaining": status.get("tokenRemaining") if status.get("tokenRemaining") is not None else status.get("token_remaining"),
-        "token_unlimited": bool(status.get("tokenUnlimited") if status.get("tokenUnlimited") is not None else status.get("token_unlimited")),
-        "time_unlimited": bool(status.get("timeUnlimited") if status.get("timeUnlimited") is not None else status.get("time_unlimited")),
-        "plan_label": status.get("planLabel") or status.get("plan_label"),
-        "message": status.get("message"),
-        "user_id": status.get("userId") or status.get("user_id"),
-        "username": status.get("username"),
-        "project_id": status.get("projectId") or status.get("project_id"),
-        "frozen": bool(status.get("frozen")),
-        "frozen_reason": status.get("frozenReason") or status.get("frozen_reason") or "",
-        "low_balance": bool(status.get("lowBalance") if status.get("lowBalance") is not None else status.get("low_balance")),
-        "device_bound": bool(status.get("deviceBound") if status.get("deviceBound") is not None else status.get("device_bound")),
-        "cached_at": time.time(),
-        "online_verified_at": time.time(),
-    }
-    if status.get("username"):
-        sess["username"] = status.get("username")
-    if status.get("userId") or status.get("user_id"):
-        sess["user_id"] = status.get("userId") or status.get("user_id")
-    save_session(sess)
+    # Serialize this read-modify-write with the usage writer. Otherwise a
+    # remote status refresh can overwrite a batch queued by the writer thread.
+    with _usage_batch_lock:
+        sess = load_session()
+        remote_used = status.get("tokenUsed") if status.get("tokenUsed") is not None else status.get("token_used")
+        token_used = int(remote_used or 0) + _pending_usage_tokens(sess)
+        token_quota = status.get("tokenQuota") if status.get("tokenQuota") is not None else status.get("token_quota")
+        remote_remaining = (
+            status.get("tokenRemaining")
+            if status.get("tokenRemaining") is not None
+            else status.get("token_remaining")
+        )
+        token_remaining = remote_remaining
+        if int(token_quota or 0) > 0:
+            local_remaining = max(0, int(token_quota) - token_used)
+            token_remaining = min(int(remote_remaining), local_remaining) if remote_remaining is not None else local_remaining
+        sess["entitlement"] = {
+            "valid": bool(status.get("valid")) and not (int(token_quota or 0) > 0 and token_used >= int(token_quota)),
+            "expire_at": status.get("expireAt") or status.get("expire_at"),
+            "token_quota": token_quota,
+            "token_used": token_used,
+            "token_remaining": token_remaining,
+            "token_unlimited": bool(status.get("tokenUnlimited") if status.get("tokenUnlimited") is not None else status.get("token_unlimited")),
+            "time_unlimited": bool(status.get("timeUnlimited") if status.get("timeUnlimited") is not None else status.get("time_unlimited")),
+            "plan_label": status.get("planLabel") or status.get("plan_label"),
+            "message": status.get("message"),
+            "user_id": status.get("userId") or status.get("user_id"),
+            "username": status.get("username"),
+            "project_id": status.get("projectId") or status.get("project_id"),
+            "frozen": bool(status.get("frozen")),
+            "frozen_reason": status.get("frozenReason") or status.get("frozen_reason") or "",
+            "low_balance": bool(status.get("lowBalance") if status.get("lowBalance") is not None else status.get("low_balance")),
+            "device_bound": bool(status.get("deviceBound") if status.get("deviceBound") is not None else status.get("device_bound")),
+            "cached_at": time.time(),
+            "online_verified_at": time.time(),
+        }
+        if status.get("username"):
+            sess["username"] = status.get("username")
+        if status.get("userId") or status.get("user_id"):
+            sess["user_id"] = status.get("userId") or status.get("user_id")
+        save_session(sess)
 
 
 def entitlement_snapshot() -> dict[str, Any]:
@@ -512,7 +575,11 @@ def entitlement_snapshot() -> dict[str, Any]:
         "require_license": license_required(),
         "cached_at": ent.get("cached_at"),
         "online_verified_at": ent.get("online_verified_at"),
-        "pending_usage_count": len(sess.get("pending_usage") or []) if isinstance(sess.get("pending_usage"), list) else 0,
+        "pending_usage_count": (
+            (len(sess.get("pending_usage") or []) if isinstance(sess.get("pending_usage"), list) else 0)
+            + (len(sess.get("pending_usage_batches") or []) if isinstance(sess.get("pending_usage_batches"), list) else 0)
+            + (len(sess.get("pending_usage_current") or {}) if isinstance(sess.get("pending_usage_current"), dict) else 0)
+        ),
         "pending_usage_last_error": sess.get("pending_usage_last_error"),
         "reserved_tokens": int(_reserved_tokens),
         "commercial_mode": is_commercial_build(),
@@ -564,7 +631,12 @@ async def refresh_status(force: bool = False) -> dict[str, Any]:
     if not force and time.time() - _refresh_ts < 30:
         return entitlement_snapshot()
     try:
-        data = await jane_request("GET", "/gateway/license/status", timeout=8.0)
+        data = await jane_request(
+            "POST",
+            "/gateway/license/status",
+            timeout=8.0,
+            scope=SENSITIVE_SCOPES["gateway-license.status"],
+        )
         if isinstance(data, dict):
             cache_entitlement(data)
             _refresh_ts = time.time()
@@ -662,32 +734,34 @@ async def release_quota(reserved: int, actual: int = 0) -> None:
         # Local used bump is handled by report_usage / cache from server.
 
 
-async def report_usage(tokens: int, request_id: str | None = None, *, estimated: bool = False) -> None:
-    if tokens <= 0 or not license_required():
+def _queue_usage_batch(tokens: int, *, estimated: bool = False) -> None:
+    """Persist at most one current batch per usage kind.
+
+    Detailed request logs remain local; the license service receives one
+    idempotent delta per flush interval instead of one write per request.
+    """
+    if tokens <= 0:
         return
-    cfg = load_config()
-    if estimated and not bill_estimated_usage(cfg):
-        return
-    sess = load_session()
-    if not sess.get("token"):
-        return
-    rid = (request_id or str(uuid.uuid4())).strip()
-    body = {"requestId": rid, "tokens": int(tokens)}
-    if estimated:
-        body["estimated"] = True
-    try:
-        data = await jane_request(
-            "POST",
-            "/gateway/license/usage",
-            json_body=body,
-            timeout=12.0,
-        )
-        if isinstance(data, dict):
-            cache_entitlement(data)
-    except Exception:
-        pending = sess.get("pending_usage") if isinstance(sess.get("pending_usage"), list) else []
-        pending.append({"requestId": rid, "tokens": int(tokens), "ts": time.time(), "estimated": bool(estimated)})
-        sess["pending_usage"] = pending[-80:]
+    with _usage_batch_lock:
+        sess = load_session()
+        current = sess.get("pending_usage_current")
+        if not isinstance(current, dict):
+            current = {}
+        key = "estimated" if estimated else "exact"
+        batch = current.get(key)
+        if not isinstance(batch, dict):
+            batch = {
+                "requestId": f"batch-{uuid.uuid4()}",
+                "tokens": 0,
+                "count": 0,
+                "ts": time.time(),
+                "estimated": bool(estimated),
+            }
+        batch["tokens"] = int(batch.get("tokens") or 0) + int(tokens)
+        batch["count"] = int(batch.get("count") or 0) + 1
+        batch["lastTs"] = time.time()
+        current[key] = batch
+        sess["pending_usage_current"] = current
         ent = sess.get("entitlement") if isinstance(sess.get("entitlement"), dict) else {}
         if ent:
             used = int(ent.get("token_used") or 0) + int(tokens)
@@ -699,16 +773,41 @@ async def report_usage(tokens: int, request_id: str | None = None, *, estimated:
                     ent["valid"] = False
                     ent["message"] = "Token 已用尽"
             sess["entitlement"] = ent
-        sess["pending_usage_last_error"] = "用量暂存本地，联网后自动上报"
+        sess["pending_usage_last_error"] = "用量已在本地聚合，将定时批量上报"
         save_session(sess)
 
 
+async def report_usage(tokens: int, request_id: str | None = None, *, estimated: bool = False) -> None:
+    if tokens <= 0 or not license_required():
+        return
+    cfg = load_config()
+    if estimated and not bill_estimated_usage(cfg):
+        return
+    if not load_session().get("token"):
+        return
+    _queue_usage_batch(int(tokens), estimated=estimated)
+
+
 async def flush_pending_usage() -> None:
-    sess = load_session()
-    pending = sess.get("pending_usage") if isinstance(sess.get("pending_usage"), list) else []
-    if not pending or not sess.get("token"):
+    with _usage_batch_lock:
+        sess = load_session()
+        if not sess.get("token"):
+            return
+        pending = list(sess.get("pending_usage") or []) if isinstance(sess.get("pending_usage"), list) else []
+        pending.extend(sess.get("pending_usage_batches") or [] if isinstance(sess.get("pending_usage_batches"), list) else [])
+        current = sess.get("pending_usage_current") if isinstance(sess.get("pending_usage_current"), dict) else {}
+        pending.extend(item for item in current.values() if isinstance(item, dict))
+        if not pending:
+            return
+        # Detach before network I/O so new requests form a fresh batch.
+        sess["pending_usage"] = []
+        sess["pending_usage_batches"] = []
+        sess["pending_usage_current"] = {}
+        save_session(sess)
+    if not pending:
         return
     left = []
+    latest_status: dict[str, Any] | None = None
     for item in pending:
         try:
             body = {"requestId": item.get("requestId"), "tokens": item.get("tokens") or 0}
@@ -719,22 +818,34 @@ async def flush_pending_usage() -> None:
                 "/gateway/license/usage",
                 json_body=body,
                 timeout=12.0,
+                scope=SENSITIVE_SCOPES["gateway-license.usage"],
             )
             if isinstance(data, dict):
-                cache_entitlement(data)
+                latest_status = data
         except Exception:
             left.append(item)
-    sess = load_session()
-    sess["pending_usage"] = left
-    if left:
-        sess["pending_usage_last_error"] = f"仍有 {len(left)} 条用量未上报，将在下次联网重试"
-    else:
-        sess.pop("pending_usage_last_error", None)
-    save_session(sess)
+    with _usage_batch_lock:
+        sess = load_session()
+        queued = sess.get("pending_usage_batches") if isinstance(sess.get("pending_usage_batches"), list) else []
+        # Never discard unacknowledged usage. requestId makes retries idempotent.
+        sess["pending_usage_batches"] = queued + left
+        if left:
+            sess["pending_usage_last_error"] = f"仍有 {len(left)} 个用量批次未上报，将在下次联网重试"
+        elif not sess.get("pending_usage_current"):
+            sess.pop("pending_usage_last_error", None)
+        save_session(sess)
+    if latest_status is not None:
+        # Requeued failures and newly queued requests must remain reflected in
+        # the local balance after applying the server's acknowledged total.
+        cache_entitlement(latest_status)
 
 
 def schedule_usage_from_row(row: dict[str, Any]) -> None:
-    if not row.get("ok") or not license_required():
+    if (
+        not row.get("ok")
+        or str(row.get("client_model") or "").strip().lower() == "probe"
+        or not license_required()
+    ):
         return
     usage = row.get("usage") if isinstance(row.get("usage"), dict) else {}
     estimated = bool(row.get("usage_estimated") or usage.get("estimated"))
@@ -751,8 +862,4 @@ def schedule_usage_from_row(row: dict[str, Any]) -> None:
         loop = asyncio.get_running_loop()
         loop.create_task(report_usage(tt, rid, estimated=estimated))
     except RuntimeError:
-        sess = load_session()
-        pending = sess.get("pending_usage") if isinstance(sess.get("pending_usage"), list) else []
-        pending.append({"requestId": rid, "tokens": tt, "ts": time.time(), "estimated": estimated})
-        sess["pending_usage"] = pending[-80:]
-        save_session(sess)
+        _queue_usage_batch(tt, estimated=estimated)

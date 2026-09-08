@@ -110,9 +110,9 @@ class ChatPanel : JPanel(BorderLayout(8, 8)) {
             .POST(HttpRequest.BodyPublishers.ofString(body))
             .build()
         val res = client.send(req, HttpResponse.BodyHandlers.ofString())
-        if (res.statusCode() == 402) {
-            throw RuntimeException("未激活或 Token 不足，请打开大帅网关控制台购买/激活")
-        }
+        if (res.statusCode() == 401) throw RuntimeException("本地 API Key 不正确，请在桌面控制台重新同步客户端")
+        if (res.statusCode() == 402) throw RuntimeException("未激活或 Token 不足，请打开大帅网关控制台购买/激活")
+        if (res.statusCode() == 429) throw RuntimeException("请求过多或上游额度受限，请稍后重试")
         if (res.statusCode() !in 200..299) {
             throw RuntimeException("HTTP ${res.statusCode()} ${res.body().take(300)}")
         }

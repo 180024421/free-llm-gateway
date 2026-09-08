@@ -19,9 +19,25 @@
 5. 登录激活 → 粘贴上游 Key → 同步客户端
 6. 关主窗口会缩到菜单栏「大帅」，点「退出网关」才真正退出
 
+用户配置、上游 Key、登录状态和日志统一保存在：
+
+`~/Library/Application Support/DashuaiGateway`
+
+首次运行新版时会自动从便携包旧 `data/` 迁移，并在同级目录创建带时间戳的迁移前备份。以后更新只需替换应用文件，不再手工复制 `data/`。
+
 ## 窗口不出现时
 
 1. 看 Dock「大帅网关」/ 菜单栏「大帅」→「显示窗口」
 2. 浏览器临时打开：http://127.0.0.1:8010/ui/
 3. 确认是最新整夹（含 `大帅网关.app`），不要只换 `.command`
-4. 查看解压目录 `data/desktop.log`
+4. 查看 `~/Library/Application Support/DashuaiGateway/desktop.log`
+
+## 正式签名与公证
+
+在 Mac 构建机设置 `DASHUAI_MAC_SIGN_IDENTITY`；如需公证，再设置 `DASHUAI_MAC_NOTARY_PROFILE`。然后执行：
+
+```bash
+packaging/sign-mac.sh "/path/to/大帅网关.app" "/path/to/大帅网关.zip"
+```
+
+未配置凭据时脚本会安全跳过，不会把证书写入仓库。

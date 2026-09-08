@@ -35,6 +35,38 @@ def test_models_auth():
     assert "代码" in ids
 
 
+def test_connect_diagnostics_requires_key_and_has_stable_checks():
+    assert client.get("/api/diagnostics/connect").status_code == 401
+    response = client.get("/api/diagnostics/connect", headers=_auth_headers())
+    assert response.status_code == 200
+    body = response.json()
+    assert body["code"] in {"READY", "NOT_READY"}
+    assert set(body["checks"]) == {"gateway", "local_key", "license", "upstream", "routes"}
+    assert body["checks"]["local_key"]["code"] == "LOCAL_KEY_OK"
+
+
+def test_update_check_selects_mac_arm64_artifact(monkeypatch):
+    async def _fake_jane(method, path, **kwargs):
+        if path == "/app-update/dashuai-gateway":
+            return {
+                "versionName": "9.9.9",
+                "desktopUrl": "windows.exe",
+                "macArm64Url": "mac-arm64.zip",
+                "macArm64Sha256": "abc",
+            }
+        return {}
+
+    monkeypatch.setattr(app_mod, "jane_request", _fake_jane)
+    monkeypatch.setattr(app_mod.sys, "platform", "darwin")
+    monkeypatch.setattr(app_mod.platform, "machine", lambda: "arm64")
+    response = client.get("/api/update/check")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["download_url"] == "mac-arm64.zip"
+    assert body["download_sha256"] == "abc"
+    assert body["platform"] == "macos"
+
+
 def test_chat_blocked_when_license_required(monkeypatch):
     from fastapi import HTTPException
 

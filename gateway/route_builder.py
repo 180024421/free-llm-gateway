@@ -95,8 +95,8 @@ _VISION_STRENGTH_PIN = (
 )
 
 ROUTE_ALIASES: dict[str, set[str]] = {
-    "日常": {"日常", "daily", "auto", "1m"},
-    "快速": {"快速", "fast", "256k"},
+    "日常": {"日常", "daily", "auto"},
+    "快速": {"快速", "fast"},
     "复杂": {"复杂", "complex"},
     "小说": {"小说", "novel"},
     "代码": {"代码", "code"},

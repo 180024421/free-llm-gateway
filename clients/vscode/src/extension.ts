@@ -15,8 +15,50 @@ const ROUTE_OPTIONS = [
 ];
 
 const MAX_SESSION = 10;
+const CONNECT_TIMEOUT_MS = 12_000;
+const CHAT_TIMEOUT_MS = 180_000;
 
 type ChatMsg = { role: "user" | "assistant"; content: string };
+
+async function fetchWithTimeout(
+  input: string,
+  init: RequestInit = {},
+  timeoutMs = CONNECT_TIMEOUT_MS
+): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(input, { ...init, signal: controller.signal });
+  } catch (error: any) {
+    if (error?.name === "AbortError") {
+      throw new Error(`连接超时（${Math.round(timeoutMs / 1000)} 秒），请确认网关已启动`);
+    }
+    const message = String(error?.message || error || "");
+    if (/ECONNREFUSED|fetch failed|Failed to fetch/i.test(message)) {
+      throw new Error("无法连接本机网关，请先启动大帅网关并检查 Base URL");
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function responseError(res: Response): Promise<Error> {
+  const raw = await res.text();
+  let detail = raw.slice(0, 300);
+  try {
+    const body = JSON.parse(raw);
+    detail = body?.detail?.message || body?.detail || body?.error?.message || detail;
+  } catch {
+    // Keep the bounded raw response.
+  }
+  const hints: Record<number, string> = {
+    401: "本地 API Key 不正确，请在桌面控制台重新同步客户端",
+    402: "未激活或 Token 不足，请打开桌面控制台购买/激活卡密",
+    429: "请求过多或上游额度受限，请稍后重试",
+  };
+  return new Error(hints[res.status] || `${res.status} ${detail}`);
+}
 
 function cfg() {
   const c = vscode.workspace.getConfiguration("dashuai");
@@ -33,6 +75,7 @@ class ChatViewProvider implements vscode.WebviewViewProvider {
   public static readonly viewType = "dashuai.chatView";
   private session: ChatMsg[] = [];
   private view?: vscode.WebviewView;
+  private requestRunning = false;
 
   constructor(private readonly ctx: vscode.ExtensionContext) {}
 
@@ -49,6 +92,12 @@ class ChatViewProvider implements vscode.WebviewViewProvider {
       if (msg?.type === "chat") {
         const prompt = String(msg.prompt || "").trim();
         if (!prompt) return;
+        if (this.requestRunning) {
+          webviewView.webview.postMessage({ type: "busy", busy: true });
+          return;
+        }
+        this.requestRunning = true;
+        webviewView.webview.postMessage({ type: "busy", busy: true });
         this.session.push({ role: "user", content: prompt });
         this.trimSession();
         try {
@@ -61,6 +110,9 @@ class ChatViewProvider implements vscode.WebviewViewProvider {
         } catch (e: any) {
           const err = `错误：${e?.message || e}`;
           webviewView.webview.postMessage({ type: "done", text: err, error: true });
+        } finally {
+          this.requestRunning = false;
+          webviewView.webview.postMessage({ type: "busy", busy: false });
         }
         return;
       }
@@ -136,6 +188,7 @@ class ChatViewProvider implements vscode.WebviewViewProvider {
     const log = document.getElementById('log');
     const meta = document.getElementById('meta');
     const prompt = document.getElementById('prompt');
+    const send = document.getElementById('send');
     let streamingEl = null;
     function add(role, text){
       const d=document.createElement('div');
@@ -153,7 +206,7 @@ class ChatViewProvider implements vscode.WebviewViewProvider {
     document.getElementById('clear').onclick=()=>{
       vscode.postMessage({type:'clear'});
     };
-    document.getElementById('send').onclick=()=>{
+    send.onclick=()=>{
       const t=prompt.value.trim();
       if(!t) return;
       add('user', t);
@@ -180,6 +233,10 @@ class ChatViewProvider implements vscode.WebviewViewProvider {
         else if (m.text && streamingEl.textContent.length < m.text.length) streamingEl.textContent = m.text;
         streamingEl = null;
       }
+      if(m.type==='busy'){
+        send.disabled=!!m.busy;
+        prompt.disabled=!!m.busy;
+      }
     });
     vscode.postMessage({type:'ready'});
   </script>
@@ -193,7 +250,7 @@ async function fetchLicenseStatus(): Promise<string> {
   const root = c.baseUrl.replace(/\/v1\/?$/, "");
   const headers: Record<string, string> = { Accept: "application/json" };
   if (c.apiKey) headers.Authorization = `Bearer ${c.apiKey}`;
-  const r = await fetch(`${root}/api/license/status?refresh=1`, { headers });
+  const r = await fetchWithTimeout(`${root}/api/license/status?refresh=1`, { headers });
   const j: any = await r.json().catch(() => ({}));
   if (!r.ok) {
     throw new Error(j?.detail?.message || j?.message || `HTTP ${r.status}`);
@@ -216,7 +273,7 @@ async function chatOnce(
   messages?: { role: string; content: string }[]
 ): Promise<string> {
   const c = cfg();
-  const res = await fetch(`${c.baseUrl}/chat/completions`, {
+  const res = await fetchWithTimeout(`${c.baseUrl}/chat/completions`, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${c.apiKey}`,
@@ -230,13 +287,9 @@ async function chatOnce(
       stream: false,
       temperature: 0.7,
     }),
-  });
-  if (res.status === 402) {
-    throw new Error("未激活或 Token 不足，请打开大帅网关控制台购买/激活卡密");
-  }
+  }, CHAT_TIMEOUT_MS);
   if (!res.ok) {
-    const t = await res.text();
-    throw new Error(`${res.status} ${t.slice(0, 300)}`);
+    throw await responseError(res);
   }
   const data: any = await res.json();
   return data?.choices?.[0]?.message?.content || JSON.stringify(data);
@@ -248,7 +301,7 @@ async function chatStream(
   onDelta?: (chunk: string) => void,
   messages?: { role: string; content: string }[]
 ): Promise<string> {
-  const res = await fetch(`${c.baseUrl}/chat/completions`, {
+  const res = await fetchWithTimeout(`${c.baseUrl}/chat/completions`, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${c.apiKey}`,
@@ -262,13 +315,9 @@ async function chatStream(
       stream: true,
       temperature: 0.7,
     }),
-  });
-  if (res.status === 402) {
-    throw new Error("未激活或 Token 不足，请打开大帅网关控制台购买/激活卡密");
-  }
+  }, CHAT_TIMEOUT_MS);
   if (!res.ok || !res.body) {
-    const t = await res.text();
-    throw new Error(`${res.status} ${t.slice(0, 300)}`);
+    throw await responseError(res);
   }
   const reader = res.body.getReader();
   const decoder = new TextDecoder("utf-8");
@@ -341,6 +390,41 @@ export function activate(context: vscode.ExtensionContext) {
         vscode.window.showInformationMessage(text);
       } catch (e: any) {
         vscode.window.showErrorMessage(`授权查询失败：${e?.message || e}`);
+      }
+    })
+  );
+  context.subscriptions.push(
+    vscode.commands.registerCommand("dashuai.testConnection", async () => {
+      const c = cfg();
+      const root = c.baseUrl.replace(/\/v1\/?$/, "");
+      try {
+        const res = await fetchWithTimeout(`${root}/api/diagnostics/connect`, {
+          headers: { Authorization: `Bearer ${c.apiKey}`, Accept: "application/json" },
+        });
+        if (!res.ok) throw await responseError(res);
+        const body: any = await res.json();
+        const failed = Object.values(body.checks || {})
+          .filter((item: any) => !item.ok)
+          .map((item: any) => item.message);
+        if (body.ok) {
+          vscode.window.showInformationMessage("大帅网关连接正常，可以开始使用");
+        } else {
+          const action = await vscode.window.showWarningMessage(
+            `网关已连接，但尚未就绪：${failed.join("；")}`,
+            "打开控制台"
+          );
+          if (action === "打开控制台") {
+            vscode.env.openExternal(vscode.Uri.parse(c.dashboardUrl));
+          }
+        }
+      } catch (error: any) {
+        const action = await vscode.window.showErrorMessage(
+          `连接测试失败：${error?.message || error}`,
+          "打开控制台"
+        );
+        if (action === "打开控制台") {
+          vscode.env.openExternal(vscode.Uri.parse(c.dashboardUrl));
+        }
       }
     })
   );
