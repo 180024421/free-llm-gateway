@@ -153,6 +153,8 @@ def _download_wheels(arch: str, wheels_dir: Path, py_ver: str) -> None:
     base = [sys.executable, "-m", "pip", "download", "-d", str(wheels_dir)]
     # 1) 平台相关二进制（pydantic-core / uvloop / pyobjc 等）
     bin_pkgs = [
+        "cryptography",
+        "cffi",
         "pydantic",
         "pydantic-core",
         "httptools",
@@ -208,7 +210,8 @@ def _download_wheels(arch: str, wheels_dir: Path, py_ver: str) -> None:
     code = run(base + any_pkgs)
     if code != 0:
         raise RuntimeError(f"pure-python wheel download failed for {arch} (exit {code})")
-    # 3) 清掉误下的 Windows 轮子 / Windows 专用依赖
+    # 3) 清掉误下的 Windows 轮子 / Windows 专用依赖。
+    # cffi 不是 Windows 专用；cryptography 在 macOS 仍可能依赖其 arm64 wheel。
     for whl in list(wheels_dir.glob("*.whl")) + list(wheels_dir.glob("*.tar.gz")):
         low = whl.name.lower()
         if (
@@ -217,12 +220,13 @@ def _download_wheels(arch: str, wheels_dir: Path, py_ver: str) -> None:
             or low.endswith("-win_arm64.whl")
             or low.startswith("pythonnet-")
             or low.startswith("clr_loader-")
-            or low.startswith("cffi-")
         ):
             _log(f"  drop windows wheel: {whl.name}")
             whl.unlink()
     names = [p.name.lower() for p in wheels_dir.glob("*.whl")]
     required_substrings = [
+        "cryptography",
+        "cffi",
         "pyobjc_core",
         "pyobjc_framework_cocoa",
         "pyobjc_framework_webkit",

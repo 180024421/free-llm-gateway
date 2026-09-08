@@ -67,6 +67,17 @@ py -3 packaging\build-mac-zip.py --arch arm64
 产物：`dist-release\大帅网关-mac-arm64.zip`  
 说明见 `packaging/mac/README.md`。打包**只含 example 配置**，勿把本机真实 Key 打进 zip。
 
+每次发布前必须执行：
+
+```powershell
+python scripts/validate_mac_release.py
+```
+
+该检查会校验 ZIP CRC、App/启动脚本权限、Info.plist 与源码版本、内置 Python
+arm64 Mach-O、macOS 原生 wheels（含 `cryptography`/`cffi`/PyObjC）、
+无 Windows wheels、v1 加密协议和 example 配置。Windows 交叉构建不能代替
+Mac 实机 GUI/签名验证；正式签名包仍须在 Apple Silicon Mac 上启动登录一次。
+
 ## 主要能力（近期）
 
 - 正式版强制授权、短离线宽限、chat 前 Token 预留（Windows 会话可用 DPAPI）
@@ -74,7 +85,8 @@ py -3 packaging\build-mac-zip.py --arch arm64
 - 自适应日常路由：用户只选「日常」即可，代码、长文、翻译、总结、推理和识图请求会按内容转到更合适的高质量路由
 - 在线选路学习：冷启动遵守候选顺序，积累调用后按成功率、首字延迟和模型能力动态排序；复杂/推理/代码仍以准确率为主
 - WorkBuddy 同步（含本地 Key）；占位 Key 不会覆盖客户端；商业包首次自动生成本地 Key
-- Mac / Windows 桌面壳：独立窗口；Mac 日志与数据统一在包内 `data/`
+- Mac / Windows 桌面壳：独立窗口；Mac 日志与数据统一在
+  `~/Library/Application Support/DashuaiGateway`
 - 消耗统计：真实 usage 优先；估算会标记 `usage_estimated`
 - 运维：用量归档/清空、配置备份、WorkBuddy 自检、License 用量上报
 - 低成本健康探测：后台每 30 分钟仅检查每渠道代表模型，手动检测才覆盖全部模型；探测不计入用户用量
@@ -102,7 +114,8 @@ python scripts/sync_version.py --check
 Android、Windows、Mac 的正式签名均使用环境变量注入凭据；仓库不保存证书或密码。详见各端 README。
 
 升级 Windows 正式包时应保留原 `data/`，其中包含本地配置、上游渠道和登录会话。
-若登录提示“未配置 license_api_base”，先安装/覆盖为最新版并重启；新版会自动补齐
+0.5.2 已修复旧空配置升级后的运行时缓存问题。若登录提示
+“未配置 license_api_base”，先安装/覆盖 0.5.2 或更高版本并彻底退出旧进程后重启；新版会自动补齐
 HTTPS 主地址和 HTTP 回退地址。仍异常时，备份后打开 `data/config.json`，确认
 `license_api_base` 为上述 HTTPS 地址，再查看 `data/desktop.log`。
 

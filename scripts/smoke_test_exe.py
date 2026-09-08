@@ -8,7 +8,9 @@ import socket
 import subprocess
 import tempfile
 import time
+import urllib.error
 import urllib.request
+import shutil
 from pathlib import Path
 
 
@@ -53,6 +55,19 @@ def request(url: str, key: str = "") -> tuple[int, bytes, str]:
     with urllib.request.urlopen(req, timeout=4) as response:
         return response.status, response.read(), response.headers.get_content_type()
 
+def post_json(url: str, payload: dict[str, object]) -> tuple[int, bytes]:
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=20) as response:
+            return response.status, response.read()
+    except urllib.error.HTTPError as error:
+        return error.code, error.read()
+
 
 def main() -> int:
     parser = argparse.ArgumentParser()
@@ -69,6 +84,12 @@ def main() -> int:
         action="store_true",
         help="launch the real desktop shell and require a newly visible window",
     )
+    parser.add_argument(
+        "--data-mode",
+        choices=("env", "portable"),
+        default="env",
+        help="use DASHUAI_DATA_DIR or reproduce double-click EXE with sibling data/",
+    )
     args = parser.parse_args()
     exe = Path(args.exe).resolve()
     if not exe.exists():
@@ -82,8 +103,15 @@ def main() -> int:
             except OSError as exc:
                 raise SystemExit(f"cold-start port {port} is busy: {exc}") from exc
     key = "sk-smoke-test-local-key"
-    with tempfile.TemporaryDirectory(prefix="dashuai-smoke-") as temp:
-        data_dir = Path(temp)
+    with tempfile.TemporaryDirectory(prefix="dashuai-smoke-", ignore_cleanup_errors=True) as temp:
+        temp_root = Path(temp)
+        launch_exe = exe
+        data_dir = temp_root
+        if args.data_mode == "portable":
+            launch_exe = temp_root / "DashuaiGateway.exe"
+            shutil.copy2(exe, launch_exe)
+            data_dir = temp_root / "data"
+            data_dir.mkdir(parents=True, exist_ok=True)
         if args.config_case != "cold":
             seeded_config = {
                 "host": "127.0.0.1",
@@ -98,11 +126,11 @@ def main() -> int:
             (data_dir / "providers.json").write_text("[]", encoding="utf-8")
             (data_dir / "routers.json").write_text("{}", encoding="utf-8")
         env = os.environ.copy()
-        env.update(
-            DASHUAI_DATA_DIR=str(data_dir),
-            DASHUAI_DESKTOP_TOAST="0",
-            DASHUAI_TOKEN_TOAST="0",
-        )
+        env.update(DASHUAI_DESKTOP_TOAST="0", DASHUAI_TOKEN_TOAST="0")
+        if args.data_mode == "env":
+            env["DASHUAI_DATA_DIR"] = str(data_dir)
+        else:
+            env.pop("DASHUAI_DATA_DIR", None)
         if not args.verify_window:
             env.update(
                 DASHUAI_SMOKE_TEST="1",
@@ -110,7 +138,7 @@ def main() -> int:
             )
         windows_before = visible_dashuai_windows() if args.verify_window else set()
         creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-        process = subprocess.Popen([str(exe)], env=env, creationflags=creationflags)
+        process = subprocess.Popen([str(launch_exe)], env=env, creationflags=creationflags)
         try:
             deadline = time.time() + args.timeout
             overview = None
@@ -144,6 +172,13 @@ def main() -> int:
             assert status == 200 and content_type == "text/html" and b"Dashuai" in html
             status, raw, _ = request(f"http://127.0.0.1:{port}/api/diagnostics/connect", key)
             assert status == 200 and json.loads(raw).get("code") in {"READY", "NOT_READY"}
+            login_status, login_body = post_json(
+                f"http://127.0.0.1:{port}/api/account/login",
+                {"username": "smoke-invalid-user", "password": "smoke-invalid-password"},
+            )
+            login_text = login_body.decode("utf-8", errors="replace")
+            assert login_status in {400, 401, 423, 429, 502, 503}, (login_status, login_text)
+            assert "未配置 license_api_base" not in login_text, login_text
             status, svg, content_type = request(f"http://127.0.0.1:{port}/api/android/pairing.svg", key)
             assert status == 200 and content_type == "image/svg+xml" and b"<svg" in svg
             if args.verify_window:
@@ -161,21 +196,27 @@ def main() -> int:
             mode = "service+window" if args.verify_window else "service"
             print(
                 "EXE smoke test passed: "
-                f"mode={mode} config={args.config_case} version={overview['version']} port={port}"
+                f"mode={mode} data={args.data_mode} config={args.config_case} "
+                f"version={overview['version']} port={port} login_status={login_status}"
             )
             return 0
         finally:
             if process.poll() is None:
-                process.terminate()
-                try:
-                    process.wait(timeout=5)
-                except subprocess.TimeoutExpired:
+                if os.name == "nt":
+                    # PyInstaller onefile 会派生同名子进程；只 terminate 父进程会残留
+                    # 子进程并继续锁住临时 EXE，必须结束整个进程树。
                     subprocess.run(
                         ["taskkill", "/PID", str(process.pid), "/T", "/F"],
                         check=False,
                         stdout=subprocess.DEVNULL,
                         stderr=subprocess.DEVNULL,
                     )
+                else:
+                    process.terminate()
+                    try:
+                        process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
 
 
 if __name__ == "__main__":

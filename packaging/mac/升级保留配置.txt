@@ -23,7 +23,8 @@
 - 安装包不会自带你的 config/providers/session（只有 example 模板）
 - 启动脚本只有「Application Support 中还没有该文件」时才会从模板复制，不会覆盖已有配置
 - 首次准备好的 runtime/venv 会留在原目录；整夹换新后需再准备一次环境（不影响 data）
-- 0.4.7+ 必须带「大帅网关.app」；不要只拷贝一个 .command
+- 0.5.2+ 必须带「大帅网关.app」；不要只拷贝一个 .command
+- 0.5.2 包已补齐 v1 授权加密需要的 cryptography/cffi/PyObjC arm64 依赖
 
 【不要】
 - 不要只拷贝一个 .command / 不要丢掉 大帅网关.app
