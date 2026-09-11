@@ -9,8 +9,9 @@ import gateway.license as lic
 
 
 def test_migrate_public_license_base():
-    assert com.migrate_public_license_base("http://111.229.202.251/api") == "http://111.229.202.251/api"
+    assert com.migrate_public_license_base("http://111.229.202.251/api") == com.PUBLIC_LICENSE_API_BASE
     assert com.migrate_public_license_base("http://111.229.202.251:8687/api") == com.PUBLIC_LICENSE_API_BASE
+    assert com.migrate_public_license_base("https://1ph1hf8043323.vicp.fun/api") == com.PUBLIC_LICENSE_API_BASE
     assert com.migrate_public_license_base(com.PUBLIC_LICENSE_API_BASE) == com.PUBLIC_LICENSE_API_BASE
 
 
@@ -19,6 +20,7 @@ def test_license_endpoint_defaults_fill_empty_string():
     assert com.apply_license_endpoint_defaults(cfg) is True
     assert cfg["license_api_base"] == com.PUBLIC_LICENSE_API_BASE
     assert cfg["license_api_base_fallback"] == com.PUBLIC_LICENSE_API_BASE_FALLBACK
+    assert cfg["license_allow_insecure_http"] is True
 
 
 def test_license_endpoint_defaults_fill_missing_key():
@@ -26,13 +28,15 @@ def test_license_endpoint_defaults_fill_missing_key():
     assert com.apply_license_endpoint_defaults(cfg) is True
     assert cfg["license_api_base"] == com.PUBLIC_LICENSE_API_BASE
     assert cfg["license_api_base_fallback"] == com.PUBLIC_LICENSE_API_BASE_FALLBACK
+    assert cfg["license_allow_insecure_http"] is True
 
 
-def test_license_endpoint_defaults_migrate_old_public_primary():
-    cfg = {"license_api_base": "http://111.229.202.251/api"}
+def test_license_endpoint_defaults_migrate_peanut_shell_primary():
+    cfg = {"license_api_base": "https://1ph1hf8043323.vicp.fun/api"}
     assert com.apply_license_endpoint_defaults(cfg) is True
     assert cfg["license_api_base"] == com.PUBLIC_LICENSE_API_BASE
     assert cfg["license_api_base_fallback"] == com.PUBLIC_LICENSE_API_BASE_FALLBACK
+    assert cfg["license_allow_insecure_http"] is True
 
 
 def test_license_endpoint_defaults_preserve_custom_addresses():
@@ -50,6 +54,20 @@ def test_license_endpoint_defaults_preserve_custom_addresses():
 def test_force_https_keeps_ip_http():
     assert com.force_https_url("http://111.229.202.251/api").startswith("http://")
     assert com.force_https_url("http://license.example.com/api").startswith("https://")
+
+
+def test_normalize_license_api_url():
+    assert com.normalize_license_api_url("http://111.229.202.251") == "http://111.229.202.251/api"
+    assert com.normalize_license_api_url("https://license.example.com/api/") == "https://license.example.com/api"
+    assert com.normalize_license_api_url("https://1ph1hf8043323.vicp.fun/api") == com.PUBLIC_LICENSE_API_BASE
+    assert com.normalize_license_api_url("", empty_ok=True) == ""
+    try:
+        com.normalize_license_api_url("not-a-url")
+        assert False, "expected ValueError"
+    except ValueError:
+        pass
+    assert com.should_allow_insecure_for_base("http://111.229.202.251/api") is True
+    assert com.should_allow_insecure_for_base("https://license.example.com/api") is False
 
 
 def test_version_newer():

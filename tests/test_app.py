@@ -3,6 +3,7 @@ from fastapi.testclient import TestClient
 from gateway.app import app
 import gateway.app as app_mod
 from gateway.config import load_config
+import json
 
 
 client = TestClient(app)
@@ -199,3 +200,81 @@ def test_workbuddy_sync_persists_local_api_key(tmp_path, monkeypatch):
     dashuai = [m for m in merged if isinstance(m, dict) and "大帅网关" in str(m.get("name") or "")]
     assert dashuai
     assert all(m.get("apiKey") == new_key for m in dashuai)
+
+
+def test_put_config_license_api_base_and_probe(tmp_path, monkeypatch):
+    import gateway.config as cfg_mod
+
+    data = tmp_path / "data"
+    data.mkdir()
+    (data / "config.json").write_text(
+        json.dumps(
+            {
+                "local_api_key": "sk-test-license-cfg",
+                "license_api_base": "http://111.229.202.251/api",
+                "license_api_base_fallback": "http://111.229.202.251/api",
+                "license_allow_insecure_http": True,
+                "require_license": False,
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("DASHUAI_DATA_DIR", str(data))
+    monkeypatch.setattr(cfg_mod, "DATA_DIR", data)
+    cfg_mod._cache.clear()
+
+    headers = {"Authorization": "Bearer sk-test-license-cfg"}
+    bad = client.put("/api/config", headers=headers, json={"license_api_base": "not-a-url"})
+    assert bad.status_code == 400
+
+    ok = client.put(
+        "/api/config",
+        headers=headers,
+        json={
+            "license_api_base": "https://license.example.com",
+            "license_api_base_fallback": "http://10.0.0.8",
+        },
+    )
+    assert ok.status_code == 200, ok.text
+    saved = ok.json()["config"]
+    assert saved["license_api_base"] == "https://license.example.com/api"
+    assert saved["license_api_base_fallback"] == "http://10.0.0.8/api"
+    assert saved.get("license_allow_insecure_http") is True
+
+    overview = client.get("/api/overview")
+    assert overview.status_code == 200
+    assert overview.json()["config"]["license_api_base"] == "https://license.example.com/api"
+
+    class _Resp:
+        status_code = 200
+
+        def json(self):
+            return {"code": 200, "data": {"keyId": "x"}}
+
+    class _Client:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def get(self, url, headers=None):
+            assert url.endswith("/crypto/public-key")
+            return _Resp()
+
+    import httpx as httpx_mod
+
+    monkeypatch.setattr(httpx_mod, "AsyncClient", _Client)
+    probe = client.post(
+        "/api/license/probe",
+        headers=headers,
+        json={"base": "https://license.example.com/api"},
+    )
+    assert probe.status_code == 200
+    assert probe.json()["ok"] is True
+

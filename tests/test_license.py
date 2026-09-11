@@ -51,22 +51,23 @@ def test_legacy_entitlement_migration(tmp_path, monkeypatch):
     assert lic._verify_entitlement_sig(sess["entitlement"], lic.device_fingerprint())
 
 
-def test_jane_bases_prefers_existing_https_domain(monkeypatch):
+def test_jane_bases_prefers_public_ip(monkeypatch):
     monkeypatch.setattr(
         lic,
         "load_config",
-        lambda: {"license_api_base": "https://1ph1hf8043323.vicp.fun/api"},
+        lambda: {"license_api_base": "http://111.229.202.251/api"},
     )
     bases = lic.jane_bases()
-    assert bases == ["https://1ph1hf8043323.vicp.fun/api"]
+    assert bases == ["http://111.229.202.251/api"]
 
 
-def test_migrate_legacy_direct_port_to_https_domain():
-    from gateway.commercial import migrate_public_license_base
+def test_migrate_legacy_peanut_and_direct_port_to_ip():
+    from gateway.commercial import PUBLIC_LICENSE_API_BASE, migrate_public_license_base
 
-    assert migrate_public_license_base("https://1ph1hf8043323.vicp.fun/api") == "https://1ph1hf8043323.vicp.fun/api"
-    assert migrate_public_license_base("http://111.229.202.251:8687/api") == "https://1ph1hf8043323.vicp.fun/api"
-    assert migrate_public_license_base("http://111.229.202.251/api") == "http://111.229.202.251/api"
+    assert migrate_public_license_base("https://1ph1hf8043323.vicp.fun/api") == PUBLIC_LICENSE_API_BASE
+    assert migrate_public_license_base("http://111.229.202.251:8687/api") == PUBLIC_LICENSE_API_BASE
+    assert migrate_public_license_base("http://111.229.202.251/api") == PUBLIC_LICENSE_API_BASE
+    assert migrate_public_license_base("https://111.229.202.251/api") == PUBLIC_LICENSE_API_BASE
 
 
 def test_jane_bases_list_and_explicit_fallback(monkeypatch):

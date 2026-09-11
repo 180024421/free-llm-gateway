@@ -206,6 +206,8 @@ def _download_wheels(arch: str, wheels_dir: Path, py_ver: str) -> None:
         "pywebview",
         "proxy_tools",
         "bottle",
+        "qrcode",
+        "pycparser",
     ]
     code = run(base + any_pkgs)
     if code != 0:

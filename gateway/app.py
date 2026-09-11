@@ -802,6 +802,25 @@ async def put_config(request: Request, _: None = Depends(_auth)) -> dict[str, An
                 else:
                     val = bool(val)
             cfg[key] = val
+    # 授权服务地址：允许面板/配置文件显式覆盖，启动默认不再强行改回内置值。
+    try:
+        from .commercial import normalize_license_api_url, should_allow_insecure_for_base
+
+        if "license_api_base" in body:
+            cfg["license_api_base"] = normalize_license_api_url(str(body.get("license_api_base") or ""))
+        if "license_api_base_fallback" in body:
+            cfg["license_api_base_fallback"] = normalize_license_api_url(
+                str(body.get("license_api_base_fallback") or ""),
+                empty_ok=True,
+            )
+        primary = str(cfg.get("license_api_base") or "").strip()
+        if primary and should_allow_insecure_for_base(primary):
+            cfg["license_allow_insecure_http"] = True
+        fallback = str(cfg.get("license_api_base_fallback") or "").strip()
+        if fallback and should_allow_insecure_for_base(fallback):
+            cfg["license_allow_insecure_http"] = True
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     # Commercial builds refuse to turn off license via API.
     try:
         from .commercial import is_commercial_build
@@ -1417,6 +1436,46 @@ async def api_license_status(refresh: bool = False) -> dict[str, Any]:
     if refresh and license_required():
         await refresh_status(force=True)
     return entitlement_snapshot()
+
+
+@app.post("/api/license/probe")
+async def api_license_probe(request: Request, _: None = Depends(_auth)) -> dict[str, Any]:
+    """Probe whether a license API base can reach /crypto/public-key."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+    from .commercial import normalize_license_api_url
+
+    raw = str(body.get("base") or body.get("license_api_base") or "").strip()
+    if not raw:
+        raw = str(load_config().get("license_api_base") or "").strip()
+    try:
+        base = normalize_license_api_url(raw)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    import httpx
+
+    url = f"{base.rstrip('/')}/crypto/public-key"
+    try:
+        async with httpx.AsyncClient(timeout=8.0, follow_redirects=True) as client:
+            resp = await client.get(url, headers={"Accept": "application/json"})
+        ok = resp.status_code < 400
+        detail = f"HTTP {resp.status_code}"
+        if ok:
+            try:
+                payload = resp.json()
+                if isinstance(payload, dict) and payload.get("code") not in (None, 200, "200"):
+                    ok = False
+                    detail = str(payload.get("message") or detail)
+            except Exception:
+                pass
+        return {"ok": ok, "base": base, "url": url, "status": resp.status_code, "message": "可达" if ok else detail}
+    except Exception as exc:
+        return {"ok": False, "base": base, "url": url, "status": 0, "message": str(exc) or "网络错误"}
 
 
 @app.get("/api/license/usage-history")

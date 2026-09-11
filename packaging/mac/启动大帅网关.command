@@ -116,9 +116,19 @@ if [ ! -f "$DESKTOP_PY" ]; then
   exit 1
 fi
 
+need_deps=0
 if [ ! -x "$VENV/bin/python" ]; then
+  need_deps=1
   echo "[大帅网关] 首次启动，正在准备运行环境（只需一次）…"
-  "$PY" -m venv "$VENV"
+elif ! "$VENV/bin/python" -c "import cryptography, cffi, webview, fastapi" >/dev/null 2>&1; then
+  need_deps=1
+  echo "[大帅网关] 运行环境缺关键依赖（常见于旧版覆盖升级），正在补齐…"
+fi
+
+if [ "$need_deps" -eq 1 ]; then
+  if [ ! -x "$VENV/bin/python" ]; then
+    "$PY" -m venv "$VENV"
+  fi
   "$VENV/bin/python" -m pip install --upgrade pip setuptools wheel >/dev/null
   rc=1
   if [ -d "$WHEELS" ]; then
@@ -136,6 +146,10 @@ if [ ! -x "$VENV/bin/python" ]; then
   fi
   if [ "$rc" -ne 0 ]; then
     alert "依赖安装失败。请检查网络后重试，或把文件夹放到无空格路径再开。"
+    exit 1
+  fi
+  if ! "$VENV/bin/python" -c "import cryptography, cffi, webview, fastapi" >/dev/null 2>&1; then
+    alert "依赖已安装但仍缺少 cryptography。请删除 runtime/venv-$ARCH 后重开，或重新解压完整安装包。"
     exit 1
   fi
   echo "[大帅网关] 环境准备完成。"

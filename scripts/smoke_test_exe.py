@@ -163,7 +163,7 @@ def main() -> int:
             # 这能捕获启动阶段过早导入 gateway.config 导致的错误目录缓存。
             assert overview.get("config", {}).get("license_api_configured") is True, overview
             persisted = json.loads((data_dir / "config.json").read_text(encoding="utf-8-sig"))
-            assert persisted.get("license_api_base") == "https://1ph1hf8043323.vicp.fun/api", persisted
+            assert persisted.get("license_api_base") == "http://111.229.202.251/api", persisted
             assert persisted.get("license_api_base_fallback") == "http://111.229.202.251/api", persisted
             assert persisted.get("require_license") is True, persisted
             key = str(persisted.get("local_api_key") or "")

@@ -22,10 +22,10 @@ cd E:\xiangmu\dashuai-gateway-main\dashuai-gateway-main
 
 面板：http://127.0.0.1:8010/ui/
 
-授权服务默认优先使用 HTTPS：`https://1ph1hf8043323.vicp.fun/api`，并保留
-`http://111.229.202.251/api` 作为故障回退（见 `data/config.example.json`）。
-正式包首次启动会写入这两个地址；升级时即使旧 `data/config.json` 中主地址为空，
-也会自动修复，用户明确填写的自定义授权地址不会被覆盖。
+授权服务当前默认直连公网 IP：`http://111.229.202.251/api`（见 `data/config.example.json`）。
+旧版花生壳域名会在启动时自动迁移到该 IP；用户明确填写的自定义授权地址不会被覆盖。
+可在面板「接入参数」修改「授权服务地址」，或直接改 `data/config.json` 的 `license_api_base`。
+后续更换正式域名时，改配置即可，不必强制发版。
 
 启动后可在面板「接入参数」点「测试连接」核对本地 Key、授权、上游渠道和路由状态。首次使用建议按以下顺序：
 

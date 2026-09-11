@@ -52,6 +52,7 @@ def main() -> int:
         init_entry = one_by_suffix(names, "app/gateway/__init__.py")
         crypto_entry = one_by_suffix(names, "app/gateway/crypto_transport.py")
         desktop_entry = one_by_suffix(names, "app/packaging/run_desktop.py")
+        req_entry = one_by_suffix(names, "app/requirements-mac.txt")
 
         plist = plistlib.loads(bundle.read(plist_name))
         version = str(plist.get("CFBundleShortVersionString") or "")
@@ -105,9 +106,13 @@ def main() -> int:
             ), matches
 
         config = json.loads(bundle.read(config_entry).decode("utf-8-sig"))
-        assert config["license_api_base"] == "https://1ph1hf8043323.vicp.fun/api"
+        assert config["license_api_base"] == "http://111.229.202.251/api"
         assert config["license_api_base_fallback"] == "http://111.229.202.251/api"
         assert config["require_license"] is True
+
+        req_text = bundle.read(req_entry).decode("utf-8").lower()
+        assert "cryptography" in req_text, "requirements-mac.txt must list cryptography"
+        assert "cffi" in req_text, "requirements-mac.txt must list cffi"
 
         crypto_source = bundle.read(crypto_entry).decode("utf-8")
         assert 'PROTOCOL_VERSION = "v1"' in crypto_source

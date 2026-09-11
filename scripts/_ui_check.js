@@ -770,6 +770,14 @@ function renderHome(j){
   $("#connBase").textContent = base;
   $("#homeKey").textContent = state.localKey;
   $("#keyMasked").textContent = j.config?.local_api_key_masked || "—";
+  const licenseBaseEl = $("#licenseApiBase");
+  if (licenseBaseEl && j.config?.license_api_base != null) {
+    licenseBaseEl.value = j.config.license_api_base || "";
+  }
+  const licenseFallbackEl = $("#licenseApiBaseFallback");
+  if (licenseFallbackEl && j.config?.license_api_base_fallback != null) {
+    licenseFallbackEl.value = j.config.license_api_base_fallback || "";
+  }
   const np = $("#novelPrefSelect");
   if (np && j.config?.novel_preferred_provider) np.value = j.config.novel_preferred_provider;
   const ns = $("#novelStreamSelect");
@@ -1687,6 +1695,55 @@ $("#btnSaveKey").onclick = async () => {
     refresh();
   }catch(e){
     toast("保存失败：当前本地 Key 不正确", true);
+  }
+};
+
+async function probeLicenseBase(){
+  const status = $("#licenseProbeStatus");
+  const base = (($("#licenseApiBase") && $("#licenseApiBase").value) || "").trim();
+  if (status) status.textContent = "探测中…";
+  try{
+    const r = await fetch("/api/license/probe", {
+      method: "POST",
+      headers: authHeaders(),
+      body: JSON.stringify({ base }),
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(errText(j, "探测失败"));
+    if (status) status.textContent = j.ok ? ("可达 · " + (j.base || base)) : ("不可达 · " + (j.message || ""));
+    toast(j.ok ? "授权服务可达" : ("授权服务不可达：" + (j.message || "")), !j.ok);
+    return j;
+  }catch(e){
+    if (status) status.textContent = "探测失败";
+    toast(String(e.message || e || "探测失败"), true);
+    return null;
+  }
+}
+
+if ($("#btnProbeLicense")) $("#btnProbeLicense").onclick = () => probeLicenseBase();
+if ($("#btnSaveLicenseBase")) $("#btnSaveLicenseBase").onclick = async () => {
+  const base = (($("#licenseApiBase") && $("#licenseApiBase").value) || "").trim();
+  const fallback = (($("#licenseApiBaseFallback") && $("#licenseApiBaseFallback").value) || "").trim();
+  if (!base) return toast("授权服务地址不能为空", true);
+  try{
+    const curResp = await fetch("/api/config", { headers: authHeaders() });
+    if (!curResp.ok) throw new Error("auth");
+    const cur = await curResp.json();
+    cur.license_api_base = base;
+    cur.license_api_base_fallback = fallback;
+    const r = await fetch("/api/config", { method: "PUT", headers: authHeaders(), body: JSON.stringify(cur) });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(errText(j, "保存失败"));
+    const saved = (j.config && j.config.license_api_base) || base;
+    if ($("#licenseApiBase")) $("#licenseApiBase").value = saved;
+    if ($("#licenseApiBaseFallback") && j.config) {
+      $("#licenseApiBaseFallback").value = j.config.license_api_base_fallback || "";
+    }
+    toast("授权服务地址已保存");
+    await probeLicenseBase();
+    refresh();
+  }catch(e){
+    toast(String(e.message || e || "保存失败"), true);
   }
 };
 

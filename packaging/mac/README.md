@@ -10,7 +10,7 @@
 
 **没有单独的 .dmg 安装盘。** 当前是 zip 便携包；解压后里面自带 **`大帅网关.app`** + `启动大帅网关.command`。Windows 才是单文件 EXE。
 
-## 怎么用（0.5.2+）
+## 怎么用（0.5.3+）
 
 1. 下载 `大帅网关-mac-arm64.zip`（Apple Silicon / M1–M4）
 2. 解压整个文件夹（可放到「应用程序」）
@@ -25,10 +25,12 @@
 
 首次运行新版时会自动从便携包旧 `data/` 迁移，并在同级目录创建带时间戳的迁移前备份。以后更新只需替换应用文件，不再手工复制 `data/`。
 
-0.5.2 已补齐 v1 授权加密所需的 `cryptography`、`cffi` 与 PyObjC arm64
-wheels。发布前在仓库根目录执行 `python scripts/validate_mac_release.py`，
-检查 ZIP、App 权限、Info.plist 版本、arm64 Mach-O、依赖平台、加密协议文件及
-example 配置。该检查不能替代 Apple Silicon Mac 上的真实启动、登录和签名验收。
+0.5.3 已修复 Mac 包把 `cryptography`/`cffi` 真正装进 venv 的问题（0.5.2 仅把
+wheel 打进 zip，但 `requirements-mac.txt` 漏写导致启动时报
+`No module named 'cryptography'`）。发布前在仓库根目录执行
+`python scripts/validate_mac_release.py`，检查 ZIP、App 权限、Info.plist 版本、
+arm64 Mach-O、依赖平台、requirements 是否含 cryptography、加密协议文件及 example
+配置。该检查不能替代 Apple Silicon Mac 上的真实启动、登录和签名验收。
 
 ## 窗口不出现时
 

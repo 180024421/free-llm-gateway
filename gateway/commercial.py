@@ -10,39 +10,39 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse, urlunparse
 
-PUBLIC_LICENSE_API_BASE = "https://1ph1hf8043323.vicp.fun/api"
+# 临时直连公网 IP（HTTP）；后续换正式域名时只改这里，并把旧域名加入迁移表。
+PUBLIC_LICENSE_API_BASE = "http://111.229.202.251/api"
 PUBLIC_LICENSE_API_BASE_HTTPS = PUBLIC_LICENSE_API_BASE
 PUBLIC_LICENSE_API_BASE_FALLBACK = "http://111.229.202.251/api"
-_PUBLIC_HOST_RE = re.compile(
-    r"https?://(?:111\.229\.202\.251:8687|1ph1hf8043323\.vicp\.fun:8687)(?=/|$)",
+_LEGACY_PUBLIC_HOST_RE = re.compile(
+    r"https?://(?:111\.229\.202\.251:8687|1ph1hf8043323\.vicp\.fun(?::\d+)?)(?=/|$)",
     re.IGNORECASE,
 )
+_LEGACY_PEANUT_HOSTS = {
+    "https://1ph1hf8043323.vicp.fun",
+    "http://1ph1hf8043323.vicp.fun",
+    "https://1ph1hf8043323.vicp.fun/api",
+    "http://1ph1hf8043323.vicp.fun/api",
+}
+_PUBLIC_IP_HOSTS = {
+    "http://111.229.202.251",
+    "https://111.229.202.251",
+    "http://111.229.202.251/api",
+    "https://111.229.202.251/api",
+}
 
 
 def migrate_public_license_base(url: str) -> str:
-    """Rewrite legacy peanut-shell / :8687 license endpoints to the current public API base."""
+    """Rewrite legacy peanut-shell / :8687 / https-IP endpoints to the current public API base."""
     raw = (url or "").strip()
     if not raw:
         return raw
-    next_url = _PUBLIC_HOST_RE.sub("https://1ph1hf8043323.vicp.fun", raw)
+    next_url = _LEGACY_PUBLIC_HOST_RE.sub("http://111.229.202.251", raw)
     lowered = next_url.rstrip("/").lower()
-    if lowered in {
-        "https://1ph1hf8043323.vicp.fun",
-        "http://1ph1hf8043323.vicp.fun",
-        "https://1ph1hf8043323.vicp.fun/api",
-        "http://1ph1hf8043323.vicp.fun/api",
-    }:
+    if lowered in _LEGACY_PEANUT_HOSTS or "1ph1hf8043323.vicp.fun" in lowered:
         return PUBLIC_LICENSE_API_BASE
-    if lowered in {
-        "http://111.229.202.251",
-        "https://111.229.202.251",
-        "http://111.229.202.251/api",
-        "https://111.229.202.251/api",
-    }:
-        # Preserve explicitly configured IP fallback; only defaults prefer HTTPS.
-        return raw.rstrip("/")
-    if next_url.lower().startswith("http://1ph1hf8043323.vicp.fun"):
-        return force_https_url(next_url)
+    if lowered in _PUBLIC_IP_HOSTS:
+        return PUBLIC_LICENSE_API_BASE
     return next_url
 
 
@@ -51,20 +51,23 @@ def apply_license_endpoint_defaults(cfg: dict[str, Any]) -> bool:
     changed = False
     raw_primary = str(cfg.get("license_api_base") or "").strip()
     primary = migrate_public_license_base(raw_primary)
-    # The bare public IP was the old packaged primary; it is now the HTTP fallback.
-    if not primary or primary.rstrip("/").lower() == PUBLIC_LICENSE_API_BASE_FALLBACK.lower():
+    if not primary:
         primary = PUBLIC_LICENSE_API_BASE
     if cfg.get("license_api_base") != primary:
         cfg["license_api_base"] = primary
         changed = True
 
     raw_fallback = str(cfg.get("license_api_base_fallback") or "").strip()
-    if not raw_fallback:
-        cfg["license_api_base_fallback"] = PUBLIC_LICENSE_API_BASE_FALLBACK
+    fallback = migrate_public_license_base(raw_fallback) if raw_fallback else ""
+    if not fallback:
+        fallback = PUBLIC_LICENSE_API_BASE_FALLBACK
+    if cfg.get("license_api_base_fallback") != fallback:
+        cfg["license_api_base_fallback"] = fallback
         changed = True
 
-    if primary == PUBLIC_LICENSE_API_BASE and cfg.get("license_allow_insecure_http") is True:
-        cfg["license_allow_insecure_http"] = False
+    # 当前公网主地址是裸 IP HTTP，正式包必须允许明文，否则会被升到不可用的 https://IP。
+    if primary == PUBLIC_LICENSE_API_BASE and cfg.get("license_allow_insecure_http") is not True:
+        cfg["license_allow_insecure_http"] = True
         changed = True
     return changed
 
@@ -135,6 +138,37 @@ def force_https_url(url: str) -> str:
     if host.replace(".", "").isdigit():
         return raw
     return urlunparse(("https", parsed.netloc, parsed.path, parsed.params, parsed.query, parsed.fragment))
+
+
+def is_bare_ip_host(host: str | None) -> bool:
+    h = (host or "").strip().lower()
+    return bool(h) and h.replace(".", "").isdigit()
+
+
+def normalize_license_api_url(url: str, *, empty_ok: bool = False) -> str:
+    """Validate/normalize a license API base. Empty allowed when empty_ok (for clearing fallback)."""
+    raw = (url or "").strip()
+    if not raw:
+        if empty_ok:
+            return ""
+        raise ValueError("授权服务地址不能为空")
+    parsed = urlparse(raw)
+    scheme = (parsed.scheme or "").lower()
+    if scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValueError("须为 http(s):// 开头的完整地址，例如 http://111.229.202.251/api")
+    path = (parsed.path or "").strip()
+    if path in {"", "/"}:
+        path = "/api"
+    normalized = urlunparse((scheme, parsed.netloc, path.rstrip("/"), "", "", "")).rstrip("/")
+    return migrate_public_license_base(normalized)
+
+
+def should_allow_insecure_for_base(url: str) -> bool:
+    parsed = urlparse((url or "").strip())
+    if (parsed.scheme or "").lower() != "http":
+        return False
+    host = (parsed.hostname or "").lower()
+    return host in {"127.0.0.1", "localhost", "::1"} or is_bare_ip_host(host)
 
 
 def https_required_for_base(cfg: dict[str, Any] | None = None) -> bool:
