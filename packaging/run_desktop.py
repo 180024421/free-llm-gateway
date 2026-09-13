@@ -60,6 +60,56 @@ _FORCE_QUIT = False
 _STATUS_KEEPALIVE: list[object] = []
 _UI_BOOT_AT = 0.0
 _ALLOW_HIDE_TO_TRAY = False
+_MAC_UI_FALLBACK_DONE = False
+
+
+def _mac_probe_ui_ok(window) -> bool:
+    """Return True if the embedded WebView appears to have loaded the UI."""
+    try:
+        state = window.evaluate_js("document.readyState")
+        if state != "complete":
+            return False
+        has = window.evaluate_js(
+            "!!(document.getElementById('licenseGate') || document.getElementById('app') "
+            "|| document.body && document.body.children.length > 0)"
+        )
+        return bool(has)
+    except Exception as exc:
+        _log(f"mac ui probe failed: {exc!r}")
+        return False
+
+
+def _mac_fallback_open_browser(ui: str) -> None:
+    """Open system browser once when the embedded Mac WebView stays blank."""
+    global _MAC_UI_FALLBACK_DONE
+    if _MAC_UI_FALLBACK_DONE or _FORCE_QUIT:
+        return
+    _MAC_UI_FALLBACK_DONE = True
+    try:
+        import webbrowser
+
+        webbrowser.open(ui)
+    except Exception as exc:
+        _log(f"mac browser open failed: {exc!r}")
+    _msgbox(
+        "大帅网关",
+        "内嵌窗口未能显示界面，已尝试用系统浏览器打开。\n\n"
+        "若浏览器仍空白，请到「系统设置 → 隐私与安全性 → 本地网络」允许本应用，\n"
+        "并查看日志：~/Library/Application Support/DashuaiGateway/desktop.log\n"
+        f"或手动打开：{ui}",
+        error=False,
+    )
+
+
+def _mac_ui_watch(window, ui: str) -> None:
+    time.sleep(4.0)
+    if _FORCE_QUIT:
+        return
+    if _mac_probe_ui_ok(window):
+        _log("mac webview ui ok")
+        return
+    _log("mac webview ui blank; opening system browser")
+    _mac_fallback_open_browser(ui)
 
 
 def _request_quit() -> None:
@@ -815,6 +865,9 @@ def main() -> None:
     threading.Thread(target=_token_low_watcher, args=(port,), daemon=True, name="dashuai-token-watch").start()
     threading.Thread(target=_tray_failure_watcher, args=(port,), daemon=True, name="dashuai-fail-watch").start()
     if sys.platform == "darwin":
+        threading.Thread(
+            target=_mac_ui_watch, args=(window, ui), daemon=True, name="dashuai-mac-ui"
+        ).start()
         try:
             # 再激活一次，避免从 .command/nohup 拉起时窗口在后台
             threading.Timer(1.2, lambda: _show_window(window)).start()

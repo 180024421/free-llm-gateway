@@ -67,6 +67,8 @@ def main() -> int:
         expected_build = version_parts[0] * 10000 + version_parts[1] * 100 + version_parts[2]
         assert str(plist.get("CFBundleVersion") or "") == str(expected_build)
         assert plist.get("CFBundleExecutable") == "大帅网关"
+        assert plist.get("NSLocalNetworkUsageDescription"), "missing NSLocalNetworkUsageDescription"
+        assert "_dashuai-gateway._tcp" in (plist.get("NSBonjourServices") or [])
         assert mode_of(bundle.getinfo(app_entry)) & 0o111
         assert mode_of(bundle.getinfo(command_entry)) & 0o111
 

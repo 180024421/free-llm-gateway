@@ -28,5 +28,11 @@
 	<string>NSApplication</string>
 	<key>LSUIElement</key>
 	<false/>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>大帅网关需要访问本机服务以显示管理界面并完成授权校验。</string>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_dashuai-gateway._tcp</string>
+	</array>
 </dict>
 </plist>
