@@ -30,5 +30,5 @@ if errorlevel 1 (
 )
 
 echo.
-echo 完成: dist-installer\大帅网关-安装包-0.5.4.exe
+echo 完成: dist-installer\大帅网关-安装包-0.5.5.exe
 exit /b 0

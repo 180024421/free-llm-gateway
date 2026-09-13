@@ -1,6 +1,6 @@
 ; Inno Setup — 大帅网关
 #define MyAppName "大帅网关"
-#define MyAppVersion "0.5.4"
+#define MyAppVersion "0.5.5"
 #define MyAppPublisher "Dashuai"
 #define MyAppExeName "DashuaiGateway.exe"
 
@@ -21,7 +21,7 @@ SolidCompression=yes
 WizardStyle=modern
 PrivilegesRequired=lowest
 ArchitecturesInstallIn64BitMode=x64compatible
-VersionInfoVersion=0.5.4.0
+VersionInfoVersion=0.5.5.0
 VersionInfoProductName={#MyAppName}
 VersionInfoCompany={#MyAppPublisher}
 

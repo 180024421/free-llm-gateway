@@ -223,6 +223,60 @@ def test_probe_row_never_reaches_license_scheduler(monkeypatch):
     assert queued == []
 
 
+def test_cache_entitlement_frozen_clears_login(tmp_path, monkeypatch):
+    import gateway.config as cfg_mod
+
+    monkeypatch.setattr(cfg_mod, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(lic, "is_commercial_build", lambda cfg=None: False)
+    monkeypatch.setattr("gateway.secrets.session_encryption_enabled", lambda cfg=None: False)
+    monkeypatch.setattr("gateway.secrets.encryption_enabled", lambda cfg=None: False)
+    lic.save_session(
+        {
+            "token": "alive",
+            "refresh_token": "rt",
+            "entitlement": {"valid": True, "token_quota": 0, "token_used": 0, "cached_at": 1},
+        }
+    )
+    lic.cache_entitlement(
+        {
+            "valid": False,
+            "frozen": True,
+            "frozenReason": "xianyu refund revoke",
+            "message": "权益已冻结",
+            "tokenQuota": 0,
+            "tokenUsed": 0,
+        }
+    )
+    sess = lic.load_session()
+    assert not sess.get("token")
+    assert not sess.get("refresh_token")
+    assert sess["entitlement"]["valid"] is False
+    assert sess["entitlement"]["frozen"] is True
+
+
+def test_cache_entitlement_unactivated_keeps_login(tmp_path, monkeypatch):
+    import gateway.config as cfg_mod
+
+    monkeypatch.setattr(cfg_mod, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(lic, "is_commercial_build", lambda cfg=None: False)
+    monkeypatch.setattr("gateway.secrets.session_encryption_enabled", lambda cfg=None: False)
+    monkeypatch.setattr("gateway.secrets.encryption_enabled", lambda cfg=None: False)
+    lic.save_session({"token": "alive", "refresh_token": "rt"})
+    lic.cache_entitlement(
+        {
+            "valid": False,
+            "frozen": False,
+            "message": "未激活卡密",
+            "tokenQuota": 0,
+            "tokenUsed": 0,
+        }
+    )
+    sess = lic.load_session()
+    assert sess.get("token") == "alive"
+    assert sess["entitlement"]["valid"] is False
+    assert sess["entitlement"]["frozen"] is False
+
+
 def test_refresh_status_401_clears_token(tmp_path, monkeypatch):
     import gateway.config as cfg_mod
 

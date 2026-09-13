@@ -508,6 +508,7 @@ def _pending_usage_tokens(sess: dict[str, Any]) -> int:
 def cache_entitlement(status: dict[str, Any]) -> None:
     # Serialize this read-modify-write with the usage writer. Otherwise a
     # remote status refresh can overwrite a batch queued by the writer thread.
+    should_kick = False
     with _usage_batch_lock:
         sess = load_session()
         remote_used = status.get("tokenUsed") if status.get("tokenUsed") is not None else status.get("token_used")
@@ -522,8 +523,26 @@ def cache_entitlement(status: dict[str, Any]) -> None:
         if int(token_quota or 0) > 0:
             local_remaining = max(0, int(token_quota) - token_used)
             token_remaining = min(int(remote_remaining), local_remaining) if remote_remaining is not None else local_remaining
+        frozen = bool(status.get("frozen"))
+        message = status.get("message")
+        if frozen and not message:
+            message = (
+                status.get("frozenReason")
+                or status.get("frozen_reason")
+                or "账号权益已冻结，请重新登录"
+            )
+        # 未兑卡也是 valid=false，不能清登录；仅冻结/禁用才踢会话
+        msg_l = str(message or "").lower()
+        revoked = frozen or ("冻结" in str(message or "")) or ("禁用" in str(message or "")) or (
+            "revok" in msg_l
+        )
+        valid = (
+            bool(status.get("valid"))
+            and not revoked
+            and not (int(token_quota or 0) > 0 and token_used >= int(token_quota))
+        )
         sess["entitlement"] = {
-            "valid": bool(status.get("valid")) and not (int(token_quota or 0) > 0 and token_used >= int(token_quota)),
+            "valid": valid,
             "expire_at": status.get("expireAt") or status.get("expire_at"),
             "token_quota": token_quota,
             "token_used": token_used,
@@ -531,11 +550,11 @@ def cache_entitlement(status: dict[str, Any]) -> None:
             "token_unlimited": bool(status.get("tokenUnlimited") if status.get("tokenUnlimited") is not None else status.get("token_unlimited")),
             "time_unlimited": bool(status.get("timeUnlimited") if status.get("timeUnlimited") is not None else status.get("time_unlimited")),
             "plan_label": status.get("planLabel") or status.get("plan_label"),
-            "message": status.get("message"),
+            "message": message,
             "user_id": status.get("userId") or status.get("user_id"),
             "username": status.get("username"),
             "project_id": status.get("projectId") or status.get("project_id"),
-            "frozen": bool(status.get("frozen")),
+            "frozen": frozen,
             "frozen_reason": status.get("frozenReason") or status.get("frozen_reason") or "",
             "low_balance": bool(status.get("lowBalance") if status.get("lowBalance") is not None else status.get("low_balance")),
             "device_bound": bool(status.get("deviceBound") if status.get("deviceBound") is not None else status.get("device_bound")),
@@ -547,6 +566,16 @@ def cache_entitlement(status: dict[str, Any]) -> None:
         if status.get("userId") or status.get("user_id"):
             sess["user_id"] = status.get("userId") or status.get("user_id")
         save_session(sess)
+        should_kick = revoked
+    if should_kick:
+        invalidate_auth_session(
+            str(
+                status.get("message")
+                or status.get("frozenReason")
+                or status.get("frozen_reason")
+                or "权益已冻结，请重新登录"
+            )
+        )
 
 
 def entitlement_snapshot() -> dict[str, Any]:
